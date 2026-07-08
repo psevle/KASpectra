@@ -24,3 +24,9 @@ if(KASPECTRA_BUILD_TESTS)
     enable_testing()
     add_subdirectory(test)
 endif()
+
+option(KASPECTRA_BUILD_EXAMPLES "Build KASpectra example CLI programs" ON)
+
+if(KASPECTRA_BUILD_EXAMPLES)
+    add_subdirectory(examples)
+endif()
