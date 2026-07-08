@@ -20,4 +20,18 @@ namespace kaspectra::constants {
     // instead of low-energy delta-functional approximation
     constexpr double E_delta_approx_max = 100.0;
 
+    constexpr double pi = 3.14159265358979323846; // pi
+
+    constexpr double k_boltzmann = 8.617333262e-14; // Boltzmann constant, GeV/K
+
+    // (hbar*c)^3 in (GeV*cm)^3. CODATA hbar*c = 1.973269804e-14 GeV*cm;
+    // stored as a single precomputed literal rather than cubed at compile
+    // time, to avoid compounding rounding across three multiplications of
+    // a ~1e-14 value
+    constexpr double hbar_c3 = 7.683505e-42;
+
+
+    constexpr double r = m_pi_charged / m_p;    // ~0.146
+    constexpr double eta_0 = 2.0 * r + r * r;
+
 }   // namespace kaspectra::constants

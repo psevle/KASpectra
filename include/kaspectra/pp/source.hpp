@@ -6,6 +6,7 @@
 #include "kaspectra/pp/secondary_spectra.hpp"
 #include "kaspectra/pp/delta_approx.hpp"
 #include "kaspectra/math/integrate.hpp"
+#include "kaspectra/species.hpp"
 #include <cmath>
 #include <stdexcept>
 
@@ -16,17 +17,17 @@
 
 namespace kaspectra::pp {
 
-    // NuMuBar kept only for API symmetry; as per astro-ph/0606058,
-    // (nu==nubar, e+==e-) it's numerically identical to NuMu.
-    enum class Species { Gamma, ElectronPositron, NuMu, NuMuBar, NuE };
+    using kaspectra::Species;
 
     inline double F_species(Species s, double x, double E_p) {
         switch (s) {
-            case Species::Gamma:            return F_gamma(x, E_p);
-            case Species::ElectronPositron: return F_e(x, E_p);
+            case Species::Gamma:    return F_gamma(x, E_p);
+            case Species::Positron: 
+            case Species::Electron: return F_e(x, E_p);
             case Species::NuMu:
-            case Species::NuMuBar:          return F_numu(x, E_p);
-            case Species::NuE:              return F_nue(x, E_p);
+            case Species::NuMuBar:  return F_numu(x, E_p);
+            case Species::NuE:
+            case Species::NuEBar:   return F_nue(x, E_p);
         }
         throw std::invalid_argument("q_species: unknown Species");
     }

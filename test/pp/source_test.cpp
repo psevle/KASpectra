@@ -10,7 +10,8 @@ using kaspectra::io::PowerLawSpectrum;
 TEST_CASE("F_species dispatches to the matching free function", "[pp][source]") {
     double x = 0.1, E = 1000.0;
     REQUIRE(F_species(Species::Gamma, x, E) == F_gamma(x, E));
-    REQUIRE(F_species(Species::ElectronPositron, x, E) == F_e(x, E));
+    REQUIRE(F_species(Species::Positron, x, E) == F_e(x, E));
+    REQUIRE(F_species(Species::Electron, x, E) == F_e(x, E));
     REQUIRE(F_species(Species::NuMu, x, E) == F_numu(x, E));
     REQUIRE(F_species(Species::NuMuBar, x, E) == F_species(Species::NuMu, x, E));
     REQUIRE(F_species(Species::NuE, x, E) == F_nue(x, E));
