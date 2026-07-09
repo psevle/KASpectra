@@ -36,23 +36,44 @@ namespace kaspectra::math {
 
     } // namespace detail
 
+    // A single-panel adaptive Simpson only samples 3 points (a, mid, b) before deciding
+    // whether to recurse. If the integrand's entire nonzero support is a narrow sliver
+    // that those initial samples miss (e.g. a threshold-peaked integrand evaluated over
+    // a domain many decades wide), it can see ~0 everywhere it looks and falsely report
+    // convergence, silently returning a result many orders of magnitude too small rather
+    // than erroring. Pre-splitting into a fixed number of panels bounds how wide a region
+    // any single panel's 3 initial samples must cover, so a narrow feature anywhere in
+    // [a,b] is guaranteed to fall inside some panel's own initial sampling.
+    constexpr int kDefaultPanels = 32;
+
     inline double integrate(const std::function<double(double)>& f, double a, double b,
-                            double abs_tol = 1e-10, double rel_tol = 1e-8, int max_depth = 50) {
+                            double abs_tol = 1e-10, double rel_tol = 1e-8, int max_depth = 50,
+                            int panels = kDefaultPanels) {
         if (a == b) return 0.0;
         double sign = 1.0;
         if (a > b) { std::swap(a, b); sign = -1.0; }
 
-        double fa = f(a), fb = f(b), fm = f(0.5 * (a + b));
-        double whole = detail::simpson(fa, fm, fb, a, b);
-        return sign * detail::adaptive_simpson(f, a, b, fa, fm, fb, whole, abs_tol, rel_tol, 0, max_depth);
+        const double panel_abs_tol = abs_tol / panels;
+        const double step = (b - a) / panels;
+        double total = 0.0;
+        double pa = a;
+        for (int i = 0; i < panels; ++i) {
+            double pb = (i == panels - 1) ? b : pa + step;
+            double fa = f(pa), fb = f(pb), fm = f(0.5 * (pa + pb));
+            double whole = detail::simpson(fa, fm, fb, pa, pb);
+            total += detail::adaptive_simpson(f, pa, pb, fa, fm, fb, whole, panel_abs_tol, rel_tol, 0, max_depth);
+            pa = pb;
+        }
+        return sign * total;
     }
 
     // u = log(E) substitution: integral f(E) dE == integral f(exp(u))*exp(u) du
     // E_p spans ~1 GeV to ~PeV
     inline double integrate_log(const std::function<double(double)>& f, double a, double b,
-                                double abs_tol = 1e-10, double rel_tol = 1e-8, int max_depth = 50) {
+                                double abs_tol = 1e-10, double rel_tol = 1e-8, int max_depth = 50,
+                                int panels = kDefaultPanels) {
         auto g = [&f](double u) { double e = std::exp(u); return f(e) * e; };
-        return integrate(g, std::log(a), std::log(b), abs_tol, rel_tol, max_depth);
+        return integrate(g, std::log(a), std::log(b), abs_tol, rel_tol, max_depth, panels);
     }
 
 // Usage
