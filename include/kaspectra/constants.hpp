@@ -7,6 +7,7 @@ namespace kaspectra::constants {
     constexpr double m_p = 0.9382720813; // Proton mass
     constexpr double m_pi_charged = 0.13957039; // Charged pion mass
     constexpr double m_mu = 0.1056583745; // Muon mass
+    constexpr double m_e = 5.10998950e-4; // Electron mass
 
     // Total (rest + kinetic) energy threshold for pi0/pi+ production in pp collisions
     // E_th = m_p + T_th, T_th = 2*m_pi + m_pi^2/(2*m_p) ~ 0.28 GeV kinetic
@@ -30,6 +31,10 @@ namespace kaspectra::constants {
     // a ~1e-14 value
     constexpr double hbar_c3 = 7.683505e-42;
 
+    // alpha * r0^2 * c in cm^3/s (alpha = fine-structure constant, r0 = classical
+    // electron radius). Precomputed literal, same rationale as hbar_c3. Used by
+    // bh/ (Chodorowski, Zdziarski & Sikora 1992, ApJ 400, 181).
+    constexpr double alpha_r0sq_c = 1.737199184e-17;
 
     constexpr double r = m_pi_charged / m_p;    // ~0.146
     constexpr double eta_0 = 2.0 * r + r * r;

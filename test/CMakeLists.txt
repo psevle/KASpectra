@@ -15,6 +15,8 @@ add_executable(kaspectra_tests
     pgamma/secondary_spectra_test.cpp
     pgamma/source_test.cpp
     pgamma/multiplicity_test.cpp
+    bh/fits_test.cpp
+    bh/source_test.cpp
 )
 target_link_libraries(kaspectra_tests PRIVATE kaspectra Catch2::Catch2WithMain)
 
