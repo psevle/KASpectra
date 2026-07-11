@@ -18,6 +18,7 @@ add_executable(kaspectra_tests
     bh/fits_test.cpp
     bh/source_test.cpp
     bh/spectrum_test.cpp
+    bh/spectrum_cache_test.cpp
 )
 target_link_libraries(kaspectra_tests PRIVATE kaspectra Catch2::Catch2WithMain)
 
