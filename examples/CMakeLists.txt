@@ -6,3 +6,6 @@ target_link_libraries(pp_spectrum PRIVATE kaspectra)
 
 add_executable(bh_rates bh_rates.cpp)
 target_link_libraries(bh_rates PRIVATE kaspectra)
+
+add_executable(bh_spectrum bh_spectrum.cpp)
+target_link_libraries(bh_spectrum PRIVATE kaspectra)
