@@ -64,3 +64,41 @@ TEST_CASE("integrate_log resolves a narrow peak pinned at the lower edge of a wi
     double golden = (1.0 - std::exp(-k * (b - a))) / k;
     REQUIRE(result == Catch::Approx(golden).epsilon(1e-6));
 }
+
+TEST_CASE("adaptive Simpson does not run away when convergence is limited by floating-point noise",
+          "[math][integrate]") {
+    // Regression for a real hang found in bh::interaction_rate at an extreme (but legal)
+    // parameter scale: near one of bh::fits.hpp's own fit thresholds, catastrophic
+    // cancellation in a closed-form expression produced ~1e-14-scale floating-point noise
+    // (non-monotonic, sign-flipping) instead of the smooth near-zero value the physics
+    // expects. adaptive_simpson's recursive tolerance halves at every level
+    // (rel_tol /= 2.0, splitting the error budget across the growing subinterval count) with
+    // nothing flooring it against machine epsilon -- once rel_tol*|combined| drops below
+    // DBL_EPSILON-scale (observed: by depth ~25 for a large-magnitude integrand), the
+    // convergence check |combined-whole|<=15*tol asks for better-than-double-precision
+    // agreement, which noise can never satisfy. Every node then recurses on both children
+    // all the way to max_depth=50: confirmed directly via an instrumented copy of this file's
+    // own logic that this explodes past 2,000,000 evaluations (still climbing) for a single
+    // integral that should cost a few hundred at most.
+    //
+    // Reproduced here with a synthetic, deterministic (not random, so the test is
+    // reproducible) noise pattern superimposed on an otherwise smooth integrand, rather than
+    // depending on bh module specifics -- isolates the integrate.hpp-level fix (flooring tol
+    // at a small multiple of ULP(combined)) from the separate, still-open bh::psi_over_kappa2
+    // cancellation issue that originally surfaced it.
+    long call_count = 0;
+    auto noisy_near_smooth = [&](double x) {
+        ++call_count;
+        double noise = (std::fmod(x * 1.0e15, 2.0) - 1.0) * 1.0e-14; // deterministic, ~1e-14 scale, sign-flipping
+        return 100.0 + std::sin(x) + noise;
+    };
+
+    double result = integrate(noisy_near_smooth, 0.0, 10.0);
+
+    REQUIRE(std::isfinite(result));
+    // Before the epsilon floor, this integrand's noise pushed adaptive_simpson to explode
+    // past 2,000,000 evaluations without converging (see instrumented reproduction above);
+    // with the floor, it should settle within a call budget appropriate for a smooth,
+    // well-conditioned integrand over kDefaultPanels=32 initial panels.
+    REQUIRE(call_count < 100000);
+}

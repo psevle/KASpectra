@@ -20,9 +20,20 @@ namespace kaspectra::bh {
         return m_p * m_e / E_p;
     }
 
+    // max_depth default is 20, not math::integrate's usual 50: near kappa==2, bh::fits.hpp's
+    // psi_over_kappa2/phi_over_kappa2 sum O(10-300)-magnitude terms that must cancel almost
+    // exactly, and that cancellation is not Lipschitz at the ULP level (confirmed directly:
+    // values fluctuate ~1e-14, sign-flipping, non-monotonic as kappa creeps toward 2 by
+    // successive ULPs). No tolerance can converge against genuine floating-point noise, so
+    // adaptive_simpson recurses toward max_depth on every affected branch. Empirically
+    // confirmed (at an extreme but legal parameter scale that surfaced this): the returned
+    // integral is BIT-IDENTICAL for max_depth in [15,25] -- refinement past ~15 changes
+    // nothing but cost, which explodes from ~43K to ~42M evaluations over that same range.
+    // 20 keeps a safety margin above the empirical convergence point while bounding worst-case
+    // cost to ~1.3M evaluations (sub-second) instead of an unbounded-in-practice recursion.
     inline double interaction_rate(double E_p, const io::PhotonField& f_ph, double epsilon_max,
                                     double abs_tol = 1e-10, double rel_tol = 1e-8,
-                                    int max_depth = 50, int panels = math::kDefaultPanels) {
+                                    int max_depth = 20, int panels = math::kDefaultPanels) {
         const double eps_lo = eps_min(E_p);
         if (eps_lo >= epsilon_max) return 0.0;
 
@@ -39,7 +50,7 @@ namespace kaspectra::bh {
     // Only ONE factor of (E_p/m_p), not squared.
     inline double energy_loss_rate(double E_p, const io::PhotonField& f_ph, double epsilon_max,
                                     double abs_tol = 1e-10, double rel_tol = 1e-8,
-                                    int max_depth = 50, int panels = math::kDefaultPanels) {
+                                    int max_depth = 20, int panels = math::kDefaultPanels) {
         using namespace kaspectra::constants;
 
         const double eps_lo = eps_min(E_p);
@@ -56,7 +67,7 @@ namespace kaspectra::bh {
     inline double q_pair_rate(const io::ProtonSpectrum& J_p, const io::PhotonField& f_ph,
                                 double E_p_max, double epsilon_max,
                                 double abs_tol = 1e-10, double rel_tol = 1e-8,
-                                int max_depth = 50, int panels = math::kDefaultPanels) {
+                                int max_depth = 20, int panels = math::kDefaultPanels) {
         using namespace kaspectra::constants;
 
         const double E_p_lo = m_p * m_e / epsilon_max;
@@ -72,7 +83,7 @@ namespace kaspectra::bh {
     inline double q_pair_energy_loss(const io::ProtonSpectrum& J_p, const io::PhotonField& f_ph,
                                         double E_p_max, double epsilon_max,
                                         double abs_tol = 1e-10, double rel_tol = 1e-8,
-                                        int max_depth = 50, int panels = math::kDefaultPanels) {
+                                        int max_depth = 20, int panels = math::kDefaultPanels) {
         using namespace kaspectra::constants;
 
         const double E_p_lo = m_p * m_e / epsilon_max;
