@@ -1,0 +1,257 @@
+#pragma once
+
+#include <cmath>
+#include <limits>
+
+#include "kaspectra/constants.hpp"
+#include "kaspectra/io/photon_field.hpp"
+#include "kaspectra/io/proton_spectrum.hpp"
+#include "kaspectra/math/integrate.hpp"
+
+namespace kaspectra::bh {
+
+    namespace detail {
+
+        inline double blumenthal_T(double k, double p_minus, double cos_theta_minus) {
+            return std::sqrt(k * k + p_minus * p_minus - 2.0 * k * p_minus * cos_theta_minus);
+        }
+
+        inline double blumenthal_Y(double k, double p_minus, double p_plus, double E_minus, double E_plus) {
+            return (2.0 / (p_minus * p_minus)) * std::log((E_plus * E_minus + p_plus * p_minus + 1.0) / k);
+        }
+
+        inline double blumenthal_y_plus(double p_plus, double E_plus) {
+            return std::log((E_plus + p_plus) / (E_plus - p_plus)) / p_plus;
+        }
+
+        inline double blumenthal_delta_plus_T(double T, double p_plus) {
+            return std::log((T + p_plus) / (T - p_plus));
+        }
+
+    }   // namespace detail
+
+    // W(k, E_minus, cos_theta_minus): dimensionless bracketed factor of
+    // Blumenthal 1970 eq.10 -- dsigma/(dE_- dcos(theta_-))
+    //     = (alpha*Z^2*r0^2*p_-*p_+/(2k^3)) * W(k, E_minus, cos_theta_minus)
+    // Returns ONLY the bracket, not the prefactor.
+    // Units: k, E_minus in m_e*c^2; E_plus = k - E_minus (energy conservation).
+    // Precondition (unguarded, matches pgamma::x_pm convention): k>=2,
+    // E_minus in [1,k-1]. Outside that range p_minus/p_plus are NaN.
+    inline double W(double k, double E_minus, double cos_theta_minus) {
+        const double E_plus = k - E_minus;
+        const double p_minus = std::sqrt(E_minus * E_minus - 1.0);
+        const double p_plus = std::sqrt(E_plus * E_plus - 1.0);
+
+        const double Delta_minus = E_minus - p_minus * cos_theta_minus;
+        const double Dm2 = Delta_minus * Delta_minus;
+        const double Dm4 = Dm2 * Dm2;
+
+        const double T            = detail::blumenthal_T(k, p_minus, cos_theta_minus);
+        const double Y            = detail::blumenthal_Y(k, p_minus, p_plus, E_minus, E_plus);
+        const double y_plus       = detail::blumenthal_y_plus(p_plus, E_plus);
+        const double delta_plus_T = detail::blumenthal_delta_plus_T(T, p_plus);
+
+        const double sin2_theta_minus = 1.0 - cos_theta_minus * cos_theta_minus;
+        double const pm2 = p_minus * p_minus;
+
+        const double term1 = -4.0 * sin2_theta_minus * (2.0 * E_minus * E_minus + 1.0) / (pm2 * Dm4);
+        const double term2 = (5.0 * E_minus * E_minus - 2.0 * E_plus * E_minus + 3.0) / (pm2 * Dm2);
+        const double term3 = (pm2 - k * k) / (T * T * Dm2);
+        const double term4 = 2.0 * E_plus / (pm2 * Delta_minus);
+
+        const double inner1 = 2.0 * E_minus * sin2_theta_minus * (3.0 * k + pm2 * E_plus) / Dm4;
+        const double inner2 = (2.0 * E_minus * E_minus * (E_minus * E_minus + E_plus * E_plus)
+                                - 7.0 * E_minus * E_minus - 3.0 * E_plus * E_minus - E_plus * E_plus + 1.0) / Dm2;
+        const double inner3 = k * (E_minus * E_minus - E_minus * E_plus - 1.0) / Delta_minus;
+        const double term5 = (Y / (p_minus * p_plus)) * (inner1 + inner2 + inner3);
+
+        const double delta_group = (2.0 / Dm2) - (3.0 * k / Delta_minus) - (k * (pm2 - k * k) / (T * T * Delta_minus));
+        const double term6 = -(delta_plus_T / (p_plus * T)) * delta_group;
+
+        const double term7 = -2.0 * y_plus / Delta_minus;
+
+        return term1 + term2 + term3 +term4 + term5 + term6 + term7;
+    }
+
+    namespace detail {
+        // KA2008 eq.60 (V_p->1 ultrarelativistic limit).
+        inline double xi_cos_theta_minus(double gamma_p, double e_e, double E_minus, double p_minus) {
+            return (gamma_p * E_minus - e_e) / (gamma_p * p_minus);
+        }
+    }   // namespace detail
+
+    // KA2008 eq.60's xi=+-1 boundary solved for E_minus. Always >= 1 (AM-GM on
+    // gamma_p, e_e), matching the physical E_- >= 1 constraint -- no clamp needed.
+    // e_e = E_e/m_e (dimensionless, Blumenthal's m_e*c^2 unit convention).
+    inline double E_minus_lo_bound(double gamma_p, double e_e) {
+        return (gamma_p * gamma_p + e_e * e_e) / (2.0 * gamma_p * e_e);
+    }
+
+    // omega_lo = E_minus_lo_bound + 1: smallest rest-frame photon energy for which
+    // [E_minus_lo, omega-1] is non-empty. Always >= 2 (AM-GM), matching W's own
+    // k>=2 precondition exactly -- no clamp needed.
+    inline double omega_lo_bound(double gamma_p, double e_e) {
+        const double s = gamma_p + e_e;
+        return (s * s) / (2.0 * gamma_p * e_e);
+    }
+
+    // eps_lo in physical GeV: lab photon energy at which [omega_lo, 2*gamma_p*eps/m_e]
+    // first becomes non-empty. Unlike the two bounds above, has NO floor as
+    // gamma_p->infinity other than m_e^2/(4*E_e) -- the eps_lo>=epsilon_max guard
+    // in dN_dEe is load-bearing, not just an optimization.
+    inline double eps_lo_bound(double gamma_p, double E_e, double m_e) {
+        const double num = gamma_p * m_e + E_e;
+        return (num * num) / (4.0 * gamma_p * gamma_p * E_e);
+    }
+
+    // Single-proton lab-frame e+ (or e-, identical by symmetry -- KA2008 states this
+    // explicitly after eq.67) differential spectrum, KA2008 eq.62.
+    //
+    //   dN/dE_e = 1/(2 gamma_p^3) Int[eps_lo,eps_max] deps f_ph(eps)/eps^2
+    //             Int[omega_lo, 2 gamma_p eps] domega omega
+    //             Int[E_lo, omega-1] dE_-/p_- W_KA(omega, E_-, xi)
+    //
+    // W_KA == d^2(sigma)/dE_- dcos(theta_-) is Blumenthal's FULL cross section
+    // (eq.58) -- NOT this file's W(), which returns only the dimensionless
+    // bracket (see its own doc comment). Relation:
+    //
+    //   W_KA(omega,E_-,cos) = alpha*r0^2 * (p_-*p_+ / (2*omega^3)) * W(omega,E_-,cos)
+    //
+    // Substituting: omega*domega combines with 1/omega^3 into domega/omega^2, one
+    // p_- cancels eq.62's dE_-/p_-, leaving p_+/p_-:
+    //
+    //   dN/dE_e = (alpha*r0^2)/(4 gamma_p^3) Int deps f_ph(eps)/eps^2
+    //             Int domega/omega^2 Int dE_- (p_+/p_-) W(omega,E_-,xi)
+    //
+    // eq.62 uses Blumenthal's c=hbar=m_e=1 convention; restoring physical units
+    // (E_e, eps in GeV, gamma_p dimensionless) needs e_e=E_e/m_e substituted
+    // throughout, plus one m_e from the eps-Jacobian, plus one c_light (folded
+    // into alpha_r0sq_c). Net prefactor: alpha_r0sq_c * m_e / (4 gamma_p^3).
+    // Verified by the moment-consistency check in test/bh/spectrum_test.cpp
+    // (integral of dN_dEe over E_e reproduces interaction_rate; energy-weighted
+    // integral reproduces energy_loss_rate).
+    //
+    // Default tolerances are deliberately looser than bh/source.hpp's single-
+    // integral functions (1e-10/1e-8/50/32 there): this is a 3-level nested
+    // integral, so every additional bit of relative precision demanded at the
+    // outer level multiplies the cost of the (already expensive) inner two
+    // integrals at every recursion step. Measured directly: at UHECR-scale
+    // gamma_p (~1e11) with a CMB target field, rel_tol=1e-6 does not finish in
+    // any practical time (adaptive recursion compounds across all 3 levels),
+    // while rel_tol=1e-4 with max_depth=20 completes in ~6s and already agrees
+    // with the moment-consistency check (see test file) to within a few
+    // percent -- ample for the ~0.1-1% intrinsic accuracy of the underlying
+    // W()/eq.62 physics itself. abs_tol is set far below any physically
+    // meaningful scale so it never dominates over rel_tol.
+    inline double dN_dEe(double E_e, double gamma_p, const io::PhotonField& f_ph, double epsilon_max,
+                            double abs_tol = 1e-25, double rel_tol = 1e-4,
+                            int max_depth = 20, int panels = 24) {
+        using namespace kaspectra::constants;
+
+        const double e_e = E_e / m_e;
+        const double eps_lo = eps_lo_bound(gamma_p, E_e, m_e);
+        if (eps_lo >= epsilon_max) return 0.0;
+
+        const double omega_lo = omega_lo_bound(gamma_p, e_e);
+        const double E_minus_lo = E_minus_lo_bound(gamma_p, e_e);
+
+        auto eps_integrand = [&](double eps) {
+            // Cheap short-circuit: at UHECR-scale gamma_p, most of [eps_lo, epsilon_max]
+            // sits far out on the photon field's own suppressed tail (e.g. a blackbody's
+            // Wien tail, where f_ph underflows to exact 0.0 well before epsilon_max is
+            // reached), while the omega/E_minus domain size below GROWS with eps -- so
+            // without this check, the most expensive nested-integral evaluations land
+            // exactly where the physical contribution is already zero. Always safe:
+            // f_ph(eps)==0.0 makes the whole integrand identically zero regardless of
+            // the (expensive) omega integral's value.
+            const double f_ph_eps = f_ph(eps);
+            if (f_ph_eps == 0.0) return 0.0;
+
+            const double omega_hi = 2.0 * gamma_p * eps / m_e;
+            if (omega_lo >= omega_hi) return 0.0;
+
+            auto omega_integrand = [&](double omega) {
+                // E_plus=omega-E_minus -> 1 (p_plus -> 0) exactly at E_minus=omega-1.
+                // W() has a removable 0/0 there (delta_plus_T/p_plus in its term6);
+                // the quadrature below always samples its upper panel edge exactly,
+                // so evaluating right at that edge returns NaN and poisons the whole
+                // integral (silently, since NaN comparisons never trigger tolerance
+                // convergence -- the adaptive recursion then runs to max_depth on
+                // every affected panel, at every level of nesting). The true limit
+                // there is finite (p_plus in the numerator of dN_dEe's own
+                // p_plus/p_minus factor cancels W's 1/p_plus term analytically), so
+                // backing the bound off by a relative epsilon drops only a
+                // measure-zero sliver, not real integration accuracy.
+                const double E_minus_hi = (omega - 1.0) * (1.0 - 1e-9);
+                if (E_minus_lo >= E_minus_hi) return 0.0;
+
+                auto E_minus_integrand = [&](double E_minus) {
+                    const double p_minus = std::sqrt(E_minus * E_minus - 1.0);
+                    const double E_plus   = omega - E_minus;
+                    const double p_plus   = std::sqrt(E_plus * E_plus - 1.0);
+                    const double xi = detail::xi_cos_theta_minus(gamma_p, e_e, E_minus, p_minus);
+                    return (p_plus / p_minus) * W(omega, E_minus, xi);
+                };
+
+                return math::integrate_log(E_minus_integrand, E_minus_lo, E_minus_hi,
+                                            abs_tol, rel_tol, max_depth, panels) / (omega * omega);
+            };
+
+            return (f_ph_eps / (eps * eps)) *
+                    math::integrate_log(omega_integrand, omega_lo, omega_hi, abs_tol, rel_tol, max_depth, panels);
+        };
+
+        return (alpha_r0sq_c * m_e / (4.0 * gamma_p * gamma_p * gamma_p)) *
+                math::integrate_log(eps_integrand, eps_lo, epsilon_max, abs_tol, rel_tol, max_depth, panels);
+    }
+
+    // Minimum proton energy for which lab electron energy E_e is kinematically
+    // reachable at all, given photon field cutoff epsilon_max. Solves
+    // eps_lo_bound(gamma_p,E_e,m_e) == epsilon_max for gamma_p: quadratic
+    // A*g^2+B*g+C=0 with A=m_e^2-4*epsilon_max*E_e, B=2*m_e*E_e, C=E_e^2.
+    // Returns +infinity if no gamma_p reaches eps_lo<=epsilon_max for this E_e
+    // (i.e. epsilon_max*E_e <= m_e^2/4).
+    inline double E_p_min(double E_e, double epsilon_max) {
+        using namespace kaspectra::constants;
+
+        const double A = m_e * m_e - 4.0 * epsilon_max * E_e;
+        if (A >= 0.0) return std::numeric_limits<double>::infinity();
+
+        const double B = 2.0 * m_e * E_e;
+        const double C = E_e * E_e;
+        const double disc = B * B - 4.0 * A * C;
+        const double q = -(B + std::sqrt(disc)) / 2.0;   // stable form, B>0 always here
+
+        return (q / A) * m_p;
+    }
+
+    // Population-level e+ (or e-) lab-frame spectrum: outer integral of dN_dEe
+    // over the proton spectrum J_p(E_p), mirroring q_pair_rate/q_pair_energy_loss.
+    //
+    // abs_tol/rel_tol/max_depth/panels here govern ONLY this outer E_p integral,
+    // not dN_dEe's own internal (eps,omega,E_minus) integrals -- dN_dEe is called
+    // with its own defaults instead of threading these through, because a single
+    // dN_dEe evaluation already costs seconds at UHECR scale (measured directly:
+    // ~6s at gamma_p~1e11 against a CMB field); reusing dN_dEe's own tuned inner
+    // defaults here and keeping the OUTER integral's own panel count small keeps
+    // the total evaluation count (panels * dN_dEe calls) tractable. J_p(E_p) is
+    // expected to be smooth (a power law or similar), so a loose outer rel_tol
+    // and few panels are sufficient -- no sharp feature is expected in E_p beyond
+    // the domain edges already guarded by E_p_lo/E_p_max.
+    inline double q_pair_spectrum(double E_e, const io::ProtonSpectrum& J_p, const io::PhotonField& f_ph,
+                                    double E_p_max, double epsilon_max,
+                                    double abs_tol = 1e-25, double rel_tol = 1e-3,
+                                    int max_depth = 10, int panels = 6) {
+        using namespace kaspectra::constants;
+
+        const double E_p_lo = E_p_min(E_e, epsilon_max);
+        if (E_p_lo >= E_p_max) return 0.0;
+
+        auto integrand = [&](double E_p) {
+            return J_p(E_p) * dN_dEe(E_e, E_p / m_p, f_ph, epsilon_max);
+        };
+
+        return math::integrate_log(integrand, E_p_lo, E_p_max, abs_tol, rel_tol, max_depth, panels);
+    }
+
+}   // namespace kaspectra::bh
