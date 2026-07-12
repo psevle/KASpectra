@@ -30,3 +30,12 @@ option(KASPECTRA_BUILD_EXAMPLES "Build KASpectra example CLI programs" ON)
 if(KASPECTRA_BUILD_EXAMPLES)
     add_subdirectory(examples)
 endif()
+
+# OFF by default, unlike the two options above: pybind11 needs Python dev
+# headers and a matching interpreter -- a real new dependency -- and a plain
+# C++-only build should keep configuring without any Python environment.
+option(KASPECTRA_BUILD_PYTHON "Build KASpectra Python bindings (pybind11)" OFF)
+
+if(KASPECTRA_BUILD_PYTHON)
+    add_subdirectory(python)
+endif()
