@@ -1,0 +1,26 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "pybind11>=2.13"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "kaspectra"
+version = "0.1.0"
+description = "Python bindings for the KASpectra cosmic-ray secondary spectra library"
+requires-python = ">=3.9"
+dependencies = ["numpy>=1.20"]
+
+[tool.scikit-build]
+cmake.args = [
+    "-DKASPECTRA_BUILD_PYTHON=ON",
+    "-DKASPECTRA_BUILD_TESTS=OFF",
+    "-DKASPECTRA_BUILD_EXAMPLES=OFF",
+]
+wheel.packages = ["python/kaspectra"]
+
+[tool.pytest.ini_options]
+testpaths = ["python/tests"]
+markers = [
+    "slow: expensive dN_dEe evaluations (seconds-to-minutes); run with -m slow",
+]
+# Slow tests are opt-in: `pytest -m slow` (or `-m ""` for everything).
+addopts = "-m 'not slow'"

@@ -1,0 +1,6 @@
+build/
+__pycache__/
+*.pyc
+# Compiled extension lands in the source-tree package dir (see python/CMakeLists.txt)
+python/kaspectra/_kaspectra*.so
+python/kaspectra/_kaspectra*.pyd
