@@ -125,6 +125,53 @@ def test_cached_spectrum_rejects_mismatched_E_e(J_p, cmb):
         bh.q_pair_spectrum_cached(2e5, J_p, t, 1e13, 1e-6)
 
 
+def test_rates_array_overloads_match_scalar_loop(cmb):
+    Es = np.array([1e9, 1e10, 1e11])
+    np.testing.assert_allclose(
+        bh.interaction_rate_array(Es, cmb, 1e-6),
+        np.array([bh.interaction_rate(e, cmb, 1e-6) for e in Es]))
+    np.testing.assert_allclose(
+        bh.energy_loss_rate_array(Es, cmb, 1e-6),
+        np.array([bh.energy_loss_rate(e, cmb, 1e-6) for e in Es]))
+
+
+def test_dN_dEe_planck_zero_below_reach():
+    kT = 2.725 * ks.constants.k_boltzmann
+    assert bh.dN_dEe_planck(1e-3, 10.0, kT, 1e-15) == 0.0
+
+
+def test_table2d_unbuilt_and_degenerate(cmb):
+    t = bh.DNdEeTable2D()
+    assert not t.built()
+    assert t(1e5, 1e9) == 0.0
+    assert not bh.DNdEeTable2D.build(cmb, 1e-6, 1e13, 0.0, 1e6).built()
+    assert not bh.DNdEeTable2D.build(cmb, 1e-6, 1e13, 1e6, 1e5).built()
+
+
+def test_table2d_unreachable_band_builds_cheap_and_zero(cmb):
+    # epsilon_max*E_e <= m_e^2/4 across the band: every line empty, no dN_dEe
+    # call made, metadata intact.
+    t = bh.DNdEeTable2D.build(cmb, 1e-15, 1e13, 1.0, 10.0, n_E_e_lines=4)
+    assert t.built()
+    assert len(t) == 4
+    assert t.epsilon_max() == 1e-15
+    assert t(3.0, 1e10) == 0.0
+    assert t(0.5, 1e10) == 0.0
+
+
+def test_q_pair_spectrum_cached_2d_guards(J_p, cmb):
+    t = bh.DNdEeTable2D.build(cmb, 1e-15, 1e13, 1.0, 10.0, n_E_e_lines=4)
+    with pytest.raises(ValueError):
+        bh.q_pair_spectrum_cached(3.0, J_p, bh.DNdEeTable2D(), 1e13, 1e-15)
+    with pytest.raises(ValueError):
+        bh.q_pair_spectrum_cached(3.0, J_p, t, 1e13, 2e-15)   # epsilon_max mismatch
+    with pytest.raises(ValueError):
+        bh.q_pair_spectrum_cached(0.1, J_p, t, 1e13, 1e-15)   # below band
+    with pytest.raises(ValueError):
+        bh.q_pair_spectrum_cached(3.0, J_p, t, 1e14, 1e-15)   # beyond gamma range
+    assert bh.q_pair_spectrum_cached(3.0, J_p, t, 1e13, 1e-15) == 0.0
+
+
 # ---- expensive parity checks (opt-in: pytest -m slow) -----------------------
 
 

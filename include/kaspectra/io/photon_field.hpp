@@ -30,7 +30,12 @@ namespace kaspectra::io {
             double operator()(double epsilon) const override {
                 return (epsilon * epsilon) / (constants::pi * constants::pi * constants::hbar_c3 * std::expm1(epsilon / kT_));
             }
-        
+
+            // kT in GeV. Exposed so Planckian-specialized fast paths (bh::dN_dEe's
+            // eq.67 branch) can recover the temperature they need to collapse the
+            // epsilon integral analytically.
+            double kT() const { return kT_; }
+
             private:
                 double kT_;
     };

@@ -104,6 +104,103 @@ namespace kaspectra::bh {
         return (num * num) / (4.0 * gamma_p * gamma_p * E_e);
     }
 
+    namespace detail {
+
+        // Innermost integral of eq.62/eq.67, shared by the general and the
+        // Planckian-specialized paths:
+        //     I(omega) = Int[E_minus_lo, omega-1] dE_- (p_+/p_-) W(omega, E_-, xi)
+        // E_plus = omega - E_minus -> 1 (p_plus -> 0) exactly at E_minus = omega-1.
+        // W() has a removable 0/0 there (delta_plus_T/p_plus in its term6); the
+        // quadrature below always samples its upper panel edge exactly, so
+        // evaluating right at that edge returns NaN and poisons the whole integral
+        // (silently, since NaN comparisons never trigger tolerance convergence --
+        // the adaptive recursion then runs to max_depth on every affected panel,
+        // at every level of nesting). The true limit there is finite (p_plus in
+        // the numerator of the p_plus/p_minus factor cancels W's 1/p_plus term
+        // analytically), so backing the bound off by a relative epsilon drops only
+        // a measure-zero sliver, not real integration accuracy.
+        inline double E_minus_integral(double omega, double gamma_p, double e_e, double E_minus_lo,
+                                        double abs_tol, double rel_tol, int max_depth, int panels) {
+            // Mirror backoff at the LOWER edge: E_minus_lo == 1 exactly when
+            // e_e == gamma_p (a query right at the spectral peak E_e =
+            // gamma_p*m_e). p_minus = 0 there, so the integrand's 1/p_minus is
+            // sampled as inf/NaN at the panel edge and the adaptive recursion
+            // grinds to max_depth at every nesting level -- measured as a
+            // multi-HOUR near-hang for a single call (vs ~seconds one grid
+            // point away). The singularity is integrable (~1/sqrt(E_- - 1)),
+            // so a relative backoff drops only a measure-zero sliver, same as
+            // the upper edge's.
+            const double E_minus_lo_eff = std::max(E_minus_lo, 1.0) * (1.0 + 1e-9);
+            const double E_minus_hi = (omega - 1.0) * (1.0 - 1e-9);
+            if (E_minus_lo_eff >= E_minus_hi) return 0.0;
+
+            auto integrand = [&](double E_minus) {
+                const double p_minus = std::sqrt(E_minus * E_minus - 1.0);
+                const double E_plus   = omega - E_minus;
+                const double p_plus   = std::sqrt(E_plus * E_plus - 1.0);
+                const double xi = xi_cos_theta_minus(gamma_p, e_e, E_minus, p_minus);
+                return (p_plus / p_minus) * W(omega, E_minus, xi);
+            };
+
+            return math::integrate_log(integrand, E_minus_lo_eff, E_minus_hi, abs_tol, rel_tol, max_depth, panels);
+        }
+
+    }   // namespace detail
+
+    // Planckian-specialized single-proton spectrum: KA2008 eq.67, extended to a
+    // finite epsilon_max. For a blackbody field the eps integral of eq.62 is
+    // done analytically by parts (eq.66):
+    //     deps f_ph(eps)/eps^2 = kT/(pi^2 hbar_c3) d ln(1 - e^{-eps/kT})
+    // Swapping the (eps, omega) integration order (the region
+    // {eps in [eps_lo, epsilon_max], omega in [omega_lo, 2 gamma_p eps/m_e]} is
+    // exactly {omega in [omega_lo, 2 gamma_p epsilon_max/m_e],
+    // eps in [omega m_e/(2 gamma_p), epsilon_max]} -- the inner eps bound is
+    // >= eps_lo automatically since 2 gamma_p eps_lo/m_e == omega_lo) collapses
+    // the triple integral to a double one:
+    //
+    //   dN/dE_e = alpha_r0sq_c m_e kT / (4 pi^2 hbar_c3 gamma_p^3)
+    //             Int[omega_lo, omega_hi] domega/omega^2
+    //               [ ln(1-e^{-epsilon_max/kT}) - ln(1-e^{-omega m_e/(2 gamma_p kT)}) ]
+    //               I(omega)
+    //
+    // The bracket is the by-parts boundary term: it handles the finite
+    // epsilon_max cutoff EXACTLY (no Wien-tail approximation), vanishes exactly
+    // at omega_hi = 2 gamma_p epsilon_max/m_e, and reduces to eq.67's
+    // -ln(1-e^{-omega/(2 gamma_p kT)}) weight as epsilon_max -> infinity. This
+    // is an algebraic rearrangement of the same integrand the general path
+    // evaluates, one adaptive-quadrature level cheaper -- results agree with
+    // dN_dEe_general to within the quadrature tolerances (see
+    // test/bh/spectrum_test.cpp's parity check).
+    inline double dN_dEe_planck(double E_e, double gamma_p, double kT, double epsilon_max,
+                                    double abs_tol = 1e-25, double rel_tol = 1e-4,
+                                    int max_depth = 20, int panels = 24) {
+        using namespace kaspectra::constants;
+
+        const double e_e = E_e / m_e;
+        const double eps_lo = eps_lo_bound(gamma_p, E_e, m_e);
+        if (eps_lo >= epsilon_max) return 0.0;
+
+        const double omega_lo = omega_lo_bound(gamma_p, e_e);
+        const double omega_hi = 2.0 * gamma_p * epsilon_max / m_e;
+        const double E_minus_lo = E_minus_lo_bound(gamma_p, e_e);
+
+        // ln(1 - e^{-x}) via log1p for accuracy at both ends; exp underflow to
+        // 0.0 (x >~ 745) gives log1p(-0.0) == 0.0, the correct limit.
+        const double L_max = std::log1p(-std::exp(-epsilon_max / kT));
+
+        auto omega_integrand = [&](double omega) {
+            const double L_omega = std::log1p(-std::exp(-omega * m_e / (2.0 * gamma_p * kT)));
+            const double weight = L_max - L_omega;
+            if (weight <= 0.0) return 0.0;
+            const double inner = detail::E_minus_integral(omega, gamma_p, e_e, E_minus_lo,
+                                                            abs_tol, rel_tol, max_depth, panels);
+            return weight * inner / (omega * omega);
+        };
+
+        return (alpha_r0sq_c * m_e * kT / (4.0 * pi * pi * hbar_c3 * gamma_p * gamma_p * gamma_p)) *
+                math::integrate_log(omega_integrand, omega_lo, omega_hi, abs_tol, rel_tol, max_depth, panels);
+    }
+
     // Single-proton lab-frame e+ (or e-, identical by symmetry -- KA2008 states this
     // explicitly after eq.67) differential spectrum, KA2008 eq.62.
     //
@@ -143,9 +240,9 @@ namespace kaspectra::bh {
     // percent -- ample for the ~0.1-1% intrinsic accuracy of the underlying
     // W()/eq.62 physics itself. abs_tol is set far below any physically
     // meaningful scale so it never dominates over rel_tol.
-    inline double dN_dEe(double E_e, double gamma_p, const io::PhotonField& f_ph, double epsilon_max,
-                            double abs_tol = 1e-25, double rel_tol = 1e-4,
-                            int max_depth = 20, int panels = 24) {
+    inline double dN_dEe_general(double E_e, double gamma_p, const io::PhotonField& f_ph, double epsilon_max,
+                                    double abs_tol = 1e-25, double rel_tol = 1e-4,
+                                    int max_depth = 20, int panels = 24) {
         using namespace kaspectra::constants;
 
         const double e_e = E_e / m_e;
@@ -171,30 +268,8 @@ namespace kaspectra::bh {
             if (omega_lo >= omega_hi) return 0.0;
 
             auto omega_integrand = [&](double omega) {
-                // E_plus=omega-E_minus -> 1 (p_plus -> 0) exactly at E_minus=omega-1.
-                // W() has a removable 0/0 there (delta_plus_T/p_plus in its term6);
-                // the quadrature below always samples its upper panel edge exactly,
-                // so evaluating right at that edge returns NaN and poisons the whole
-                // integral (silently, since NaN comparisons never trigger tolerance
-                // convergence -- the adaptive recursion then runs to max_depth on
-                // every affected panel, at every level of nesting). The true limit
-                // there is finite (p_plus in the numerator of dN_dEe's own
-                // p_plus/p_minus factor cancels W's 1/p_plus term analytically), so
-                // backing the bound off by a relative epsilon drops only a
-                // measure-zero sliver, not real integration accuracy.
-                const double E_minus_hi = (omega - 1.0) * (1.0 - 1e-9);
-                if (E_minus_lo >= E_minus_hi) return 0.0;
-
-                auto E_minus_integrand = [&](double E_minus) {
-                    const double p_minus = std::sqrt(E_minus * E_minus - 1.0);
-                    const double E_plus   = omega - E_minus;
-                    const double p_plus   = std::sqrt(E_plus * E_plus - 1.0);
-                    const double xi = detail::xi_cos_theta_minus(gamma_p, e_e, E_minus, p_minus);
-                    return (p_plus / p_minus) * W(omega, E_minus, xi);
-                };
-
-                return math::integrate_log(E_minus_integrand, E_minus_lo, E_minus_hi,
-                                            abs_tol, rel_tol, max_depth, panels) / (omega * omega);
+                return detail::E_minus_integral(omega, gamma_p, e_e, E_minus_lo,
+                                                abs_tol, rel_tol, max_depth, panels) / (omega * omega);
             };
 
             return (f_ph_eps / (eps * eps)) *
@@ -203,6 +278,21 @@ namespace kaspectra::bh {
 
         return (alpha_r0sq_c * m_e / (4.0 * gamma_p * gamma_p * gamma_p)) *
                 math::integrate_log(eps_integrand, eps_lo, epsilon_max, abs_tol, rel_tol, max_depth, panels);
+    }
+
+    // Public entry point: dispatches to the Planckian-specialized eq.67 path
+    // when f_ph is a BlackbodyPhotonField (one adaptive-quadrature level
+    // cheaper; an exact algebraic rearrangement of the same integral, not an
+    // approximation -- see dN_dEe_planck), otherwise evaluates the general
+    // eq.62 triple integral. dN_dEe_general stays public as the
+    // field-type-agnostic reference path.
+    inline double dN_dEe(double E_e, double gamma_p, const io::PhotonField& f_ph, double epsilon_max,
+                            double abs_tol = 1e-25, double rel_tol = 1e-4,
+                            int max_depth = 20, int panels = 24) {
+        if (const auto* bb = dynamic_cast<const io::BlackbodyPhotonField*>(&f_ph)) {
+            return dN_dEe_planck(E_e, gamma_p, bb->kT(), epsilon_max, abs_tol, rel_tol, max_depth, panels);
+        }
+        return dN_dEe_general(E_e, gamma_p, f_ph, epsilon_max, abs_tol, rel_tol, max_depth, panels);
     }
 
     // Minimum proton energy for which lab electron energy E_e is kinematically

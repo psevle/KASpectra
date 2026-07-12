@@ -48,6 +48,32 @@ void bind_bh(py::module_& m) {
            py::arg("max_depth") = 20, py::arg("panels") = kaspectra::math::kDefaultPanels,
            "Single-proton BH energy-loss rate -dE_p/dt [GeV/s].");
 
+    bh.def("interaction_rate_array",
+           [](py::array_t<double, py::array::c_style | py::array::forcecast> E_p,
+              const PhotonField& f_ph, double epsilon_max,
+              double abs_tol, double rel_tol, int max_depth, int panels) {
+               return map_array(E_p, [&](double e) {
+                   return interaction_rate(e, f_ph, epsilon_max, abs_tol, rel_tol, max_depth, panels);
+               });
+           },
+           py::arg("E_p"), py::arg("f_ph"), py::arg("epsilon_max"),
+           py::arg("abs_tol") = 1e-10, py::arg("rel_tol") = 1e-8,
+           py::arg("max_depth") = 20, py::arg("panels") = kaspectra::math::kDefaultPanels,
+           "Vectorized interaction_rate over an array of E_p (GIL released).");
+
+    bh.def("energy_loss_rate_array",
+           [](py::array_t<double, py::array::c_style | py::array::forcecast> E_p,
+              const PhotonField& f_ph, double epsilon_max,
+              double abs_tol, double rel_tol, int max_depth, int panels) {
+               return map_array(E_p, [&](double e) {
+                   return energy_loss_rate(e, f_ph, epsilon_max, abs_tol, rel_tol, max_depth, panels);
+               });
+           },
+           py::arg("E_p"), py::arg("f_ph"), py::arg("epsilon_max"),
+           py::arg("abs_tol") = 1e-10, py::arg("rel_tol") = 1e-8,
+           py::arg("max_depth") = 20, py::arg("panels") = kaspectra::math::kDefaultPanels,
+           "Vectorized energy_loss_rate over an array of E_p (GIL released).");
+
     bh.def("q_pair_rate", &q_pair_rate,
            py::arg("J_p"), py::arg("f_ph"), py::arg("E_p_max"), py::arg("epsilon_max"),
            py::arg("abs_tol") = 1e-10, py::arg("rel_tol") = 1e-8,
@@ -68,6 +94,22 @@ void bind_bh(py::module_& m) {
            "3-level nested adaptive integral, up to several seconds per call at "
            "UHECR gamma_p against a CMB-like field. Prefer DNdEeTable for repeated "
            "evaluations at the same gamma_p or E_e.");
+
+    bh.def("dN_dEe_general", &dN_dEe_general,
+           py::arg("E_e"), py::arg("gamma_p"), py::arg("f_ph"), py::arg("epsilon_max"),
+           py::arg("abs_tol") = 1e-25, py::arg("rel_tol") = 1e-4,
+           py::arg("max_depth") = 20, py::arg("panels") = 24,
+           "Field-type-agnostic eq.62 triple integral -- the reference path. "
+           "dN_dEe itself auto-dispatches blackbody fields to the faster "
+           "Planckian-specialized eq.67 form.");
+
+    bh.def("dN_dEe_planck", &dN_dEe_planck,
+           py::arg("E_e"), py::arg("gamma_p"), py::arg("kT"), py::arg("epsilon_max"),
+           py::arg("abs_tol") = 1e-25, py::arg("rel_tol") = 1e-4,
+           py::arg("max_depth") = 20, py::arg("panels") = 24,
+           "Planckian-specialized dN_dEe (KA2008 eq.67 extended to finite "
+           "epsilon_max): exact rearrangement of the eq.62 integral, one "
+           "quadrature level cheaper. kT in GeV.");
 
     bh.def("dN_dEe_array",
            [](py::array_t<double, py::array::c_style | py::array::forcecast> E_e, double gamma_p,
@@ -113,8 +155,10 @@ void bind_bh(py::module_& m) {
            "Closed-form kinematically reachable E_e window at fixed gamma_p.");
 
     bh.def("suggested_n_points", &suggested_n_points,
-           py::arg("x_lo"), py::arg("x_hi"), py::arg("points_per_decade") = 24,
-           "Grid-density heuristic for DNdEeTable build points (default 24/decade).");
+           py::arg("x_lo"), py::arg("x_hi"),
+           py::arg("points_per_decade") = kaspectra::bh::detail::kDefaultPointsPerDecade,
+           "Grid-density heuristic for DNdEeTable build points (default 12/decade, "
+           "benchmarked: ~2.5% max interpolation error near the peak).");
 
     py::class_<DNdEeTable>(bh, "DNdEeTable",
         "Cached/interpolated stand-in for dN_dEe. Build once via over_gamma_p or "
@@ -152,7 +196,9 @@ void bind_bh(py::module_& m) {
            "Convenience: builds a DNdEeTable via over_gamma_p with gamma_p_max "
            "derived from E_p_max, matching what q_pair_spectrum_cached expects.");
 
-    bh.def("q_pair_spectrum_cached", &q_pair_spectrum_cached,
+    bh.def("q_pair_spectrum_cached",
+           py::overload_cast<double, const ProtonSpectrum&, const DNdEeTable&,
+                             double, double, double, double, int, int>(&q_pair_spectrum_cached),
            py::arg("E_e"), py::arg("J_p"), py::arg("table"),
            py::arg("E_p_max"), py::arg("epsilon_max"),
            py::arg("abs_tol") = 1e-25, py::arg("rel_tol") = 1e-3,
@@ -161,4 +207,34 @@ void bind_bh(py::module_& m) {
            "calling dN_dEe at every outer quadrature node. Raises ValueError "
            "(pybind11's default translation of std::invalid_argument) if the table "
            "doesn't match this E_e/axis, or doesn't cover E_p_max.");
+
+    py::class_<DNdEeTable2D>(bh, "DNdEeTable2D",
+        "2D cache over (E_e, gamma_p): one over_gamma_p line per log-spaced E_e "
+        "node, log-interpolated between adjacent lines. One build serves a whole "
+        "SED sweep via q_pair_spectrum_cached.")
+        .def(py::init<>(), "Empty table: built()==False, __call__ always returns 0.0.")
+        .def_static("build", &DNdEeTable2D::build,
+                    py::arg("f_ph"), py::arg("epsilon_max"), py::arg("E_p_max"),
+                    py::arg("E_e_min"), py::arg("E_e_max"),
+                    py::arg("n_E_e_lines") = 0, py::arg("n_points_per_line") = 0,
+                    py::arg("abs_tol") = 1e-25, py::arg("rel_tol") = 1e-4,
+                    py::arg("max_depth") = 20, py::arg("panels") = 24,
+                    "Build over the E_e band [E_e_min, E_e_max] with proton budget E_p_max.")
+        .def("__call__", &DNdEeTable2D::operator(), py::arg("E_e"), py::arg("gamma_p"))
+        .def("built", &DNdEeTable2D::built)
+        .def("epsilon_max", &DNdEeTable2D::epsilon_max)
+        .def("gamma_p_max", &DNdEeTable2D::gamma_p_max)
+        .def("E_e_min", &DNdEeTable2D::E_e_min)
+        .def("E_e_max", &DNdEeTable2D::E_e_max)
+        .def("__len__", &DNdEeTable2D::n_lines);
+
+    bh.def("q_pair_spectrum_cached",
+           py::overload_cast<double, const ProtonSpectrum&, const DNdEeTable2D&,
+                             double, double, double, double, int, int>(&q_pair_spectrum_cached),
+           py::arg("E_e"), py::arg("J_p"), py::arg("table"),
+           py::arg("E_p_max"), py::arg("epsilon_max"),
+           py::arg("abs_tol") = 1e-25, py::arg("rel_tol") = 1e-3,
+           py::arg("max_depth") = 10, py::arg("panels") = 6,
+           "SED-sweep variant: one shared DNdEeTable2D serves every E_e in its "
+           "built band. Raises ValueError on epsilon_max/band/E_p_max mismatch.");
 }

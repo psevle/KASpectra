@@ -3,9 +3,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <future>
 #include <limits>
 #include <memory>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 #include "kaspectra/bh/spectrum.hpp"
@@ -23,6 +25,9 @@
 //      (feeds q_pair_spectrum_cached's outer integral)
 //   2) DNdEeTable::over_E_e      -- fixed gamma_p, varying E_e
 //      (feeds CLI-style sweeps, e.g. examples/bh_spectrum.cpp)
+//   3) DNdEeTable2D::build       -- varying BOTH axes
+//      (one build amortized across an entire SED sweep of
+//      q_pair_spectrum_cached calls; see the class doc below)
 //
 // Honest cost/benefit: building an N-point table costs N dN_dEe calls
 // up front. A single q_pair_spectrum_cached call is roughly a wash against
@@ -81,11 +86,17 @@ namespace kaspectra::bh {
 
     namespace detail {
 
-        // dN_dEe's peak spans ~3 orders of magnitude within ~1.5 decades of
-        // its varying axis; 24 points/decade puts ~36 points across that
-        // region, keeping log-log-linear interpolation error to a few percent
-        // there (see spectrum_cache_test.cpp's table-vs-direct check).
-        constexpr int kDefaultPointsPerDecade = 24;
+        // Benchmarked directly (48-ppd dense dN_dEe reference over a 3-decade
+        // band crossing the spectral peak, gamma_p=1e6, warm blackbody;
+        // coarser grids simulated by subsampling): max/median interpolation
+        // error vs points-per-decade was 3.5%/0.8% at 4, 2.9%/0.2% at 8,
+        // 2.5%/0.09% at 12, 1.6%/0.03% at 24. Max error is dominated by
+        // curvature near the peak and band edges and barely improves with
+        // density, while build cost scales linearly with it -- 12/decade
+        // matches the few-percent intrinsic accuracy of dN_dEe itself (see
+        // spectrum.hpp's tolerance notes) at half the cost of the previous
+        // default of 24.
+        constexpr int kDefaultPointsPerDecade = 12;
 
         // Analytic zero boundaries are backed off by this relative margin
         // before the first/last grid node is placed, matching the existing
@@ -214,11 +225,33 @@ namespace kaspectra::bh {
                 const double log_lo = std::log(lo), log_hi = std::log(hi);
                 for (std::size_t i = 0; i < n_; ++i) {
                     const double frac = static_cast<double>(i) / static_cast<double>(n_ - 1);
-                    const double x = std::exp(log_lo + frac * (log_hi - log_lo));
-                    const double y = f(x);
-                    xs[i] = x;
-                    ys[i] = std::max(y, detail::kYFloor);
+                    xs[i] = std::exp(log_lo + frac * (log_hi - log_lo));
                 }
+
+                // Grid points are independent dN_dEe evaluations (seconds each at
+                // UHECR scale), each writing only its own slot -- embarrassingly
+                // parallel. f is required to be thread-safe: every PhotonField/
+                // ProtonSpectrum implementation in io/ is immutable after
+                // construction and dN_dEe itself has no shared state. std::async
+                // (not raw std::thread) so an exception in any chunk propagates
+                // out of get() instead of terminating. Results are bit-identical
+                // to the serial loop: same xs, same per-point arithmetic, no
+                // reduction order to vary.
+                const std::size_t hw = std::max<std::size_t>(1, std::thread::hardware_concurrency());
+                const std::size_t n_chunks = std::min(hw, n_);
+                std::vector<std::future<void>> chunks;
+                chunks.reserve(n_chunks);
+                for (std::size_t c = 0; c < n_chunks; ++c) {
+                    const std::size_t i_lo = c * n_ / n_chunks;
+                    const std::size_t i_hi = (c + 1) * n_ / n_chunks;
+                    chunks.push_back(std::async(std::launch::async, [&, i_lo, i_hi] {
+                        for (std::size_t i = i_lo; i < i_hi; ++i) {
+                            ys[i] = std::max(f(xs[i]), detail::kYFloor);
+                        }
+                    }));
+                }
+                for (auto& ch : chunks) ch.get();
+
                 interp_ = std::make_unique<math::Interpolator1D>(std::move(xs), std::move(ys), math::InterpMode::LogLog);
             }
 
@@ -294,6 +327,138 @@ namespace kaspectra::bh {
 
         auto integrand = [&](double E_p) {
             return J_p(E_p) * table(E_p / m_p);
+        };
+
+        return math::integrate_log(integrand, E_p_lo, E_p_max, abs_tol, rel_tol, max_depth, panels);
+    }
+
+    // 2D cache over (E_e, gamma_p): a "table of tables" -- one over_gamma_p
+    // line per log-spaced E_e node, log-interpolated between adjacent lines at
+    // query time. Chosen over a flat rectangular grid because the reachable
+    // gamma_p window depends on E_e: each line snaps to ITS OWN exact
+    // E_p_min(E_e) threshold, so no grid cell ever blends real values with
+    // out-of-window zeros along the gamma_p axis. Along the E_e axis, a node
+    // that is unreachable outright (E_p_min infinite, or above gamma_p_max)
+    // yields an empty line; interpolation against an empty neighbour falls
+    // back from log-log to linear so the value decays continuously to 0
+    // instead of blowing up on log(0).
+    //
+    // Amortization: ONE build serves an entire SED sweep -- every
+    // q_pair_spectrum_cached(E_e, ...) call for E_e inside the built band, at
+    // any J_p and any E_p_max up to the built bound. Build cost is
+    // n_lines * (points per line) dN_dEe calls (each line's evaluation loop is
+    // parallel, see DNdEeTable::build).
+    class DNdEeTable2D {
+        public:
+            DNdEeTable2D() = default;
+
+            // Explicitly move-only: lines_ holds move-only DNdEeTable entries,
+            // but std::vector declares a copy constructor unconditionally, so
+            // is_copy_constructible<DNdEeTable2D> would (wrongly) report true
+            // and pybind11/generic code would hard-error inside the vector on
+            // instantiation instead of falling back to the move.
+            DNdEeTable2D(const DNdEeTable2D&) = delete;
+            DNdEeTable2D& operator=(const DNdEeTable2D&) = delete;
+            DNdEeTable2D(DNdEeTable2D&&) = default;
+            DNdEeTable2D& operator=(DNdEeTable2D&&) = default;
+
+            // E_e band [E_e_min, E_e_max] and proton budget E_p_max are the
+            // same numbers an SED sweep already has. epsilon_max is STORED and
+            // checked by q_pair_spectrum_cached (unlike the 1D table, whose
+            // guards cannot catch it); f_ph remains uncheckable (no equality
+            // comparison on PhotonField) -- caller keeps that consistent.
+            static DNdEeTable2D build(const io::PhotonField& f_ph, double epsilon_max,
+                                        double E_p_max, double E_e_min, double E_e_max,
+                                        int n_E_e_lines = 0, int n_points_per_line = 0,
+                                        double abs_tol = 1e-25, double rel_tol = 1e-4,
+                                        int max_depth = 20, int panels = 24) {
+                DNdEeTable2D t;
+                t.epsilon_max_ = epsilon_max;
+                t.gamma_p_max_ = E_p_max / kaspectra::constants::m_p;
+                if (!(E_e_min > 0.0) || !(E_e_min < E_e_max)) return t;
+
+                const int n = n_E_e_lines > 0 ? n_E_e_lines : suggested_n_points(E_e_min, E_e_max);
+                t.E_e_nodes_.resize(static_cast<std::size_t>(std::max(n, 2)));
+                t.lines_.resize(t.E_e_nodes_.size());
+
+                const double log_lo = std::log(E_e_min), log_hi = std::log(E_e_max);
+                for (std::size_t i = 0; i < t.E_e_nodes_.size(); ++i) {
+                    const double frac = static_cast<double>(i) / static_cast<double>(t.E_e_nodes_.size() - 1);
+                    const double E_e = std::exp(log_lo + frac * (log_hi - log_lo));
+                    t.E_e_nodes_[i] = E_e;
+                    t.lines_[i] = DNdEeTable::over_gamma_p(E_e, f_ph, epsilon_max, t.gamma_p_max_,
+                                                            n_points_per_line, abs_tol, rel_tol,
+                                                            max_depth, panels);
+                }
+                t.built_ = true;
+                return t;
+            }
+
+            // 0.0 outside the built E_e band (and wherever both bracketing
+            // lines are 0/unreachable) -- same "0 beyond domain" convention as
+            // the 1D table's two-sided axis.
+            double operator()(double E_e, double gamma_p) const {
+                if (!built_) return 0.0;
+                if (E_e < E_e_nodes_.front() || E_e > E_e_nodes_.back()) return 0.0;
+
+                const auto it = std::upper_bound(E_e_nodes_.begin(), E_e_nodes_.end(), E_e);
+                const std::size_t hi = std::min<std::size_t>(
+                    static_cast<std::size_t>(it - E_e_nodes_.begin()), E_e_nodes_.size() - 1);
+                const std::size_t lo = hi == 0 ? 0 : hi - 1;
+                if (lo == hi) return lines_[lo](gamma_p);
+
+                const double y0 = lines_[lo](gamma_p);
+                const double y1 = lines_[hi](gamma_p);
+                const double frac = (std::log(E_e) - std::log(E_e_nodes_[lo])) /
+                                    (std::log(E_e_nodes_[hi]) - std::log(E_e_nodes_[lo]));
+                if (y0 > 0.0 && y1 > 0.0) {
+                    return std::exp((1.0 - frac) * std::log(y0) + frac * std::log(y1));
+                }
+                return (1.0 - frac) * y0 + frac * y1;   // near a zero boundary: linear, decays to 0
+            }
+
+            bool built() const { return built_; }
+            double epsilon_max() const { return epsilon_max_; }
+            double gamma_p_max() const { return gamma_p_max_; }
+            double E_e_min() const { return built_ ? E_e_nodes_.front() : 0.0; }
+            double E_e_max() const { return built_ ? E_e_nodes_.back() : 0.0; }
+            std::size_t n_lines() const { return lines_.size(); }
+
+        private:
+            bool built_ = false;
+            double epsilon_max_ = 0.0;
+            double gamma_p_max_ = 0.0;
+            std::vector<double> E_e_nodes_;
+            std::vector<DNdEeTable> lines_;
+    };
+
+    // SED-sweep sibling of q_pair_spectrum_cached: same outer integral, but
+    // consulting one shared 2D table for every E_e in the built band instead
+    // of needing a fresh 1D table per E_e.
+    inline double q_pair_spectrum_cached(double E_e, const io::ProtonSpectrum& J_p, const DNdEeTable2D& table,
+                                            double E_p_max, double epsilon_max,
+                                            double abs_tol = 1e-25, double rel_tol = 1e-3,
+                                            int max_depth = 10, int panels = 6) {
+        using namespace kaspectra::constants;
+
+        if (!table.built()) {
+            throw std::invalid_argument("q_pair_spectrum_cached: 2D table was never built");
+        }
+        if (std::fabs(table.epsilon_max() - epsilon_max) > 1e-9 * epsilon_max) {
+            throw std::invalid_argument("q_pair_spectrum_cached: 2D table was built for a different epsilon_max");
+        }
+        if (E_e < table.E_e_min() * (1.0 - 1e-9) || E_e > table.E_e_max() * (1.0 + 1e-9)) {
+            throw std::invalid_argument("q_pair_spectrum_cached: E_e outside the 2D table's built band");
+        }
+        if (E_p_max / m_p > table.gamma_p_max() * (1.0 + 1e-6)) {
+            throw std::invalid_argument("q_pair_spectrum_cached: E_p_max exceeds the 2D table's built gamma_p range");
+        }
+
+        const double E_p_lo = E_p_min(E_e, epsilon_max);
+        if (E_p_lo >= E_p_max) return 0.0;
+
+        auto integrand = [&](double E_p) {
+            return J_p(E_p) * table(E_e, E_p / m_p);
         };
 
         return math::integrate_log(integrand, E_p_lo, E_p_max, abs_tol, rel_tol, max_depth, panels);
