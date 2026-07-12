@@ -242,3 +242,96 @@ TEST_CASE("q_pair_spectrum_cached rejects a mismatched table", "[bh][spectrum_ca
     auto unreachable_table = bh::DNdEeTable::over_gamma_p(E_e, cmb, eps_max, E_p_min_here * 1.01 / constants::m_p * 0.5, 4);
     REQUIRE_THROWS_AS(bh::q_pair_spectrum_cached(E_e, J_p, unreachable_table, E_p_max, eps_max), std::invalid_argument);
 }
+
+// --- DNdEeTable2D ------------------------------------------------------------
+
+TEST_CASE("DNdEeTable2D default construction and degenerate bands stay unbuilt", "[bh][spectrum_cache]") {
+    bh::DNdEeTable2D empty;
+    REQUIRE_FALSE(empty.built());
+    REQUIRE(empty(1e5, 1e9) == 0.0);
+
+    BlackbodyPhotonField cmb(2.725);
+    REQUIRE_FALSE(bh::DNdEeTable2D::build(cmb, 1e-6, 1e13, 0.0, 1e6).built());   // E_e_min not > 0
+    REQUIRE_FALSE(bh::DNdEeTable2D::build(cmb, 1e-6, 1e13, 1e6, 1e5).built());   // inverted band
+}
+
+TEST_CASE("DNdEeTable2D over an unreachable band builds instantly and returns zero everywhere",
+          "[bh][spectrum_cache]") {
+    // epsilon_max*E_e <= m_e^2/4 across the whole band: E_p_min is infinite at
+    // every node, so every line is empty -- no dN_dEe call is ever made, yet
+    // the table is built() with its metadata (epsilon_max, band, gamma_p_max)
+    // intact. This is what makes the guard tests below cheap.
+    BlackbodyPhotonField cmb(2.725);
+    double eps_max = 1e-15;
+
+    auto t = bh::DNdEeTable2D::build(cmb, eps_max, 1e13, 1.0, 10.0, 4);
+    REQUIRE(t.built());
+    REQUIRE(t.n_lines() == 4);
+    REQUIRE(t.epsilon_max() == eps_max);
+    REQUIRE(t.E_e_min() == Catch::Approx(1.0));
+    REQUIRE(t.E_e_max() == Catch::Approx(10.0));
+    REQUIRE(t(3.0, 1e10) == 0.0);       // inside band, unreachable
+    REQUIRE(t(0.5, 1e10) == 0.0);       // below band
+    REQUIRE(t(20.0, 1e10) == 0.0);      // above band
+}
+
+TEST_CASE("q_pair_spectrum_cached (2D) rejects mismatched tables", "[bh][spectrum_cache]") {
+    BlackbodyPhotonField cmb(2.725);
+    PowerLawSpectrum J_p(1.0, 2.0);
+    double eps_max = 1e-15;
+    double E_p_max = 1e13;
+
+    // Never built.
+    bh::DNdEeTable2D unbuilt;
+    REQUIRE_THROWS_AS(bh::q_pair_spectrum_cached(3.0, J_p, unbuilt, E_p_max, eps_max), std::invalid_argument);
+
+    auto t = bh::DNdEeTable2D::build(cmb, eps_max, E_p_max, 1.0, 10.0, 4);
+    REQUIRE(t.built());
+
+    // Different epsilon_max than the build (the 2D table stores and checks it).
+    REQUIRE_THROWS_AS(bh::q_pair_spectrum_cached(3.0, J_p, t, E_p_max, eps_max * 2.0), std::invalid_argument);
+
+    // E_e outside the built band.
+    REQUIRE_THROWS_AS(bh::q_pair_spectrum_cached(0.1, J_p, t, E_p_max, eps_max), std::invalid_argument);
+    REQUIRE_THROWS_AS(bh::q_pair_spectrum_cached(100.0, J_p, t, E_p_max, eps_max), std::invalid_argument);
+
+    // E_p_max beyond the built gamma_p range.
+    REQUIRE_THROWS_AS(bh::q_pair_spectrum_cached(3.0, J_p, t, E_p_max * 10.0, eps_max), std::invalid_argument);
+
+    // In-band, in-range, unreachable window: plain 0, no throw.
+    REQUIRE(bh::q_pair_spectrum_cached(3.0, J_p, t, E_p_max, eps_max) == 0.0);
+}
+
+TEST_CASE("DNdEeTable2D agrees with direct dN_dEe and feeds q_pair_spectrum_cached",
+          "[bh][spectrum_cache][slow]") {
+    // Same warm-blackbody off-peak configuration as the 1D accuracy test above;
+    // the 2D table adds one more interpolation layer (across E_e lines), so the
+    // tolerance is a bit looser than the 1D test's 0.2.
+    double kT = 1e-7; // GeV
+    BlackbodyPhotonField warm_field(kT / constants::k_boltzmann);
+    double eps_max = 1e-6;
+    double gamma_p = 1e6;
+    double peak = gamma_p * constants::m_e;
+    double E_p_max = 2e6 * constants::m_p;
+
+    auto t = bh::DNdEeTable2D::build(warm_field, eps_max, E_p_max, peak * 0.05, peak * 0.2, 4, 6);
+    REQUIRE(t.built());
+
+    // Off-node in BOTH axes: geometric means of the band and of the gamma range.
+    double E_e = std::sqrt(t.E_e_min() * t.E_e_max());
+    double direct = bh::dN_dEe(E_e, gamma_p, warm_field, eps_max);
+    double interpolated = t(E_e, gamma_p);
+    CAPTURE(E_e, direct, interpolated);
+    REQUIRE(direct > 0.0);
+    REQUIRE(interpolated == Catch::Approx(direct).epsilon(0.3));
+
+    // The population integral through the 2D table matches the direct one.
+    PowerLawSpectrum J_p(1.0, 2.0);
+    double cached = bh::q_pair_spectrum_cached(E_e, J_p, t, E_p_max, eps_max);
+    double direct_q = bh::q_pair_spectrum(E_e, J_p, warm_field, E_p_max, eps_max);
+    CAPTURE(cached, direct_q);
+    REQUIRE(std::isfinite(cached));
+    if (direct_q > 0.0) {
+        REQUIRE(cached == Catch::Approx(direct_q).epsilon(0.3));
+    }
+}

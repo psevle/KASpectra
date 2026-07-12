@@ -216,3 +216,60 @@ TEST_CASE("q_pair_spectrum is finite, non-negative, and zero below the reachable
     REQUIRE(std::isfinite(v));
     REQUIRE(v >= 0.0);
 }
+
+TEST_CASE("dN_dEe_planck returns exactly zero below the photon field's reach", "[bh][spectrum]") {
+    // Same analytic eps_lo >= epsilon_max early return as the general path --
+    // cheap, no integral evaluated.
+    double kT = 2.725 * constants::k_boltzmann;
+    REQUIRE(bh::dN_dEe_planck(1e-3, 10.0, kT, 1e-15) == 0.0);
+}
+
+TEST_CASE("dN_dEe_planck agrees with dN_dEe_general, and dN_dEe dispatches blackbody fields to it",
+          "[bh][spectrum][slow]") {
+    // The Planckian path is an EXACT algebraic rearrangement of eq.62 (the eps
+    // integral done analytically by parts, eq.66/67, extended to finite
+    // epsilon_max) -- so the two paths must agree to within the quadrature
+    // tolerances themselves, not just physics-level accuracy. Warm blackbody
+    // off-peak band keeps the general path's cost at ~1s/call (same config as
+    // spectrum_cache_test.cpp's accuracy test).
+    double gamma_p = 1e6;
+    double kT = 1e-7; // GeV
+    BlackbodyPhotonField warm_field(kT / constants::k_boltzmann);
+    double eps_max = 20.0 * kT;
+    double peak = gamma_p * constants::m_e;
+
+    for (double frac : {0.05, 0.15}) {
+        double E_e = peak * frac;
+        double general = bh::dN_dEe_general(E_e, gamma_p, warm_field, eps_max);
+        double planck = bh::dN_dEe_planck(E_e, gamma_p, kT, eps_max);
+        CAPTURE(E_e, general, planck);
+        REQUIRE(general > 0.0);
+        REQUIRE(planck == Catch::Approx(general).epsilon(0.05));
+
+        // Auto-dispatch: dN_dEe with a BlackbodyPhotonField IS the planck path.
+        // Compare against a planck call fed the field's OWN kT() -- the
+        // Kelvin->GeV->Kelvin construction roundtrip shifts kT by an ulp
+        // relative to the raw 1e-7 used above, so only this form is bitwise
+        // identical to what the dispatcher computes.
+        REQUIRE(bh::dN_dEe(E_e, gamma_p, warm_field, eps_max)
+                == bh::dN_dEe_planck(E_e, gamma_p, warm_field.kT(), eps_max));
+    }
+}
+
+TEST_CASE("dN_dEe_planck handles the finite epsilon_max cutoff exactly", "[bh][spectrum][slow]") {
+    // The by-parts boundary term makes the finite-epsilon_max form exact, so a
+    // cutoff INSIDE the field's occupied range (where it actually bites -- at
+    // 4kT a blackbody still has real occupancy) must reproduce the general
+    // path's value, not just the epsilon_max -> infinity limit of eq.67.
+    double gamma_p = 1e6;
+    double kT = 1e-7;
+    BlackbodyPhotonField warm_field(kT / constants::k_boltzmann);
+    double E_e = gamma_p * constants::m_e * 0.1;
+
+    double eps_max_tight = 4.0 * kT;
+    double general = bh::dN_dEe_general(E_e, gamma_p, warm_field, eps_max_tight);
+    double planck = bh::dN_dEe_planck(E_e, gamma_p, kT, eps_max_tight);
+    CAPTURE(general, planck);
+    REQUIRE(general > 0.0);
+    REQUIRE(planck == Catch::Approx(general).epsilon(0.05));
+}
