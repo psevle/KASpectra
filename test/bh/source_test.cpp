@@ -119,3 +119,33 @@ TEST_CASE("q_pair_rate and q_pair_energy_loss return exactly zero when E_p_max i
     REQUIRE(bh::q_pair_rate(J_p, cmb, 1.0, eps_max) == 0.0);
     REQUIRE(bh::q_pair_energy_loss(J_p, cmb, 1.0, eps_max) == 0.0);
 }
+
+TEST_CASE("interaction_rate does not hang at an extreme photon-field normalization", "[bh][source]") {
+    // Regression for a real (confirmed via a standalone timed probe: >20M adaptive_simpson
+    // evaluations and still climbing before this fix) near-hang. Near kappa==2,
+    // psi_over_kappa2's [2,4) branch sums O(10-300)-magnitude terms that must cancel almost
+    // exactly; that cancellation is not Lipschitz at the ULP level (confirmed directly: the
+    // returned value fluctuates ~1e-14, sign-flipping, as kappa creeps toward 2 by successive
+    // ULPs). At a photon-field normalization extreme enough to make the integrand's absolute
+    // magnitude huge everywhere (including in this noisy near-threshold region), the old
+    // max_depth=50 default let adaptive_simpson chase this unresolvable noise almost all the
+    // way to max_depth on every affected branch. Confirmed empirically (see bh/source.hpp's
+    // doc comment on interaction_rate) that the answer is bit-identical for max_depth in
+    // [15,25] -- this test's real assertion is that the call returns promptly at all, not
+    // its specific numeric value.
+    const double gamma_p = 10.0;
+    const double E_p = gamma_p * constants::m_p;
+    const double kT = 1e-4; // GeV -- deliberately unphysical/hot, not a real CMB-like scale
+    const double T_kelvin = kT / constants::k_boltzmann;
+    const double eps_max = 20.0 * constants::m_e / (2.0 * gamma_p);
+
+    BlackbodyPhotonField f_ph(T_kelvin);
+    double rate = bh::interaction_rate(E_p, f_ph, eps_max);
+    double loss = bh::energy_loss_rate(E_p, f_ph, eps_max);
+
+    CAPTURE(rate, loss);
+    REQUIRE(std::isfinite(rate));
+    REQUIRE(std::isfinite(loss));
+    REQUIRE(rate >= 0.0);
+    REQUIRE(loss >= 0.0);
+}
