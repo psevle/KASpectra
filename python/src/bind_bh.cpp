@@ -39,25 +39,25 @@ void bind_bh(py::module_& m) {
     bh.def("interaction_rate", &interaction_rate,
            py::arg("E_p"), py::arg("f_ph"), py::arg("epsilon_max"),
            py::arg("abs_tol") = 1e-10, py::arg("rel_tol") = 1e-8,
-           py::arg("max_depth") = 50, py::arg("panels") = kaspectra::math::kDefaultPanels,
+           py::arg("max_depth") = 20, py::arg("panels") = kaspectra::math::kDefaultPanels,
            "Single-proton BH pair-production interaction rate [s^-1].");
 
     bh.def("energy_loss_rate", &energy_loss_rate,
            py::arg("E_p"), py::arg("f_ph"), py::arg("epsilon_max"),
            py::arg("abs_tol") = 1e-10, py::arg("rel_tol") = 1e-8,
-           py::arg("max_depth") = 50, py::arg("panels") = kaspectra::math::kDefaultPanels,
+           py::arg("max_depth") = 20, py::arg("panels") = kaspectra::math::kDefaultPanels,
            "Single-proton BH energy-loss rate -dE_p/dt [GeV/s].");
 
     bh.def("q_pair_rate", &q_pair_rate,
            py::arg("J_p"), py::arg("f_ph"), py::arg("E_p_max"), py::arg("epsilon_max"),
            py::arg("abs_tol") = 1e-10, py::arg("rel_tol") = 1e-8,
-           py::arg("max_depth") = 50, py::arg("panels") = kaspectra::math::kDefaultPanels,
+           py::arg("max_depth") = 20, py::arg("panels") = kaspectra::math::kDefaultPanels,
            "Population-level BH interaction rate, integrated over J_p.");
 
     bh.def("q_pair_energy_loss", &q_pair_energy_loss,
            py::arg("J_p"), py::arg("f_ph"), py::arg("E_p_max"), py::arg("epsilon_max"),
            py::arg("abs_tol") = 1e-10, py::arg("rel_tol") = 1e-8,
-           py::arg("max_depth") = 50, py::arg("panels") = kaspectra::math::kDefaultPanels,
+           py::arg("max_depth") = 20, py::arg("panels") = kaspectra::math::kDefaultPanels,
            "Population-level BH energy-loss rate, integrated over J_p.");
 
     bh.def("dN_dEe", &dN_dEe,
