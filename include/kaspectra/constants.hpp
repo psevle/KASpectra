@@ -39,4 +39,10 @@ namespace kaspectra::constants {
     constexpr double r = m_pi_charged / m_p;    // ~0.146
     constexpr double eta_0 = 2.0 * r + r * r;
 
+    // Unit-conversion conveniences for reporting observables in
+    // astrophysically conventional units (the library itself works in
+    // GeV/cm/s throughout).
+    constexpr double cm_per_Mpc = 3.0856775814913673e24;   // IAU 2015 parsec definition x 1e6
+    constexpr double seconds_per_year = 3.15576e7;         // Julian year
+
 }   // namespace kaspectra::constants

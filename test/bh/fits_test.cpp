@@ -20,6 +20,33 @@ TEST_CASE("phi_over_kappa2 is exactly zero below threshold", "[bh][fits]") {
     REQUIRE(phi_over_kappa2(1.9999) == 0.0);
 }
 
+TEST_CASE("psi_over_kappa2 is accurate at machine precision near threshold", "[bh][fits]") {
+    // Golden values from a 60-digit mpmath evaluation of the printed eq.2.4.
+    // psi vanishes QUARTICALLY at kappa=2 (orders 0-3 of its Taylor expansion
+    // are identically zero, a4 = 1/16 exactly), so the printed form loses all
+    // significant digits to cancellation by kappa-2 ~ 1e-4; the series/
+    // delta-form rewrite in fits.hpp holds ~1e-12 or better everywhere.
+    struct Ref { double kappa, ref; };
+    const Ref refs[] = {
+        {2.0 + 1e-9, 3.2724934249951868e-38},
+        {2.0 + 1e-7, 3.2724917697429673e-30},
+        {2.0001,     3.271936085001196e-18},
+        {2.001,      3.266935223874015e-14},
+        {2.5,        0.00095771683458671812},
+        {3.5,        0.02468867161574065},
+        {3.999,      0.049443787122196545},
+    };
+    for (const auto& r : refs) {
+        CAPTURE(r.kappa);
+        REQUIRE(psi_over_kappa2(r.kappa) == Catch::Approx(r.ref).epsilon(1e-10));
+    }
+    REQUIRE(psi_over_kappa2(2.0) == 0.0);
+
+    // Continuity across the internal series/delta-form switch at kappa=2.25.
+    REQUIRE(psi_over_kappa2(2.25 - 1e-12)
+            == Catch::Approx(psi_over_kappa2(2.25 + 1e-12)).epsilon(1e-9));
+}
+
 TEST_CASE("psi_over_kappa2 matches independently recomputed values", "[bh][fits]") {
     REQUIRE(psi_over_kappa2(2.0) == Catch::Approx(0.0).margin(1e-10)); // eq.2.4, kappa->2+
     REQUIRE(psi_over_kappa2(3.0) == Catch::Approx(8.24180698e-03).epsilon(1e-6));

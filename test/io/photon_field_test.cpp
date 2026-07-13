@@ -55,3 +55,20 @@ TEST_CASE("PhotonField implementations are usable through the base pointer", "[i
         REQUIRE((*f)(1.0e-7) >= 0.0);
     }
 }
+
+TEST_CASE("CompositePhotonField sums its components and is empty-safe", "[io][photon_field]") {
+    CompositePhotonField empty;
+    REQUIRE(empty(1.0e-13) == 0.0);
+    REQUIRE(empty.size() == 0);
+
+    BlackbodyPhotonField cmb(2.725);
+    PowerLawPhotonField ir(1.0e5, 1.5, 1.0e-10);
+    CompositePhotonField combo;
+    combo.add(cmb);
+    combo.add(ir);
+    REQUIRE(combo.size() == 2);
+    for (double eps : {1.0e-14, 1.0e-13, 1.0e-11, 1.0e-10}) {
+        CAPTURE(eps);
+        REQUIRE(combo(eps) == Catch::Approx(cmb(eps) + ir(eps)).epsilon(1e-12));
+    }
+}

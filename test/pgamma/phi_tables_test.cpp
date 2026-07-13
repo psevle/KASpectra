@@ -19,12 +19,21 @@ TEST_CASE("lookup_table_I interpolates linearly between rows", "[pgamma][phi_tab
     REQUIRE(p.B == Catch::Approx(3.925e-18));
 }
 
-TEST_CASE("lookup_table_I clamps outside its tabulated range", "[pgamma][phi_tables]") {
-    auto below = lookup_table_I(0.5);
+TEST_CASE("lookup_table_I blends B to zero at threshold and clamps above its range",
+          "[pgamma][phi_tables]") {
+    // Paper (text below eq.29): B_gamma -> 0 exactly at eta/eta_0 = 1. Below
+    // the first tabulated row at 1.1, B is blended linearly to that zero
+    // (previously it clamped to the row-1.1 value, overestimating the
+    // amplitude across the whole [1.0, 1.1) sliver); s/delta still clamp.
     auto row_1_1 = lookup_table_I(1.1);
+    REQUIRE(lookup_table_I(1.0).B == 0.0);
+    REQUIRE(lookup_table_I(0.5).B == 0.0);
+    REQUIRE(lookup_table_I(1.05).B == Catch::Approx(0.5 * row_1_1.B));
+    REQUIRE(lookup_table_I(1.1 - 1e-9).B == Catch::Approx(row_1_1.B).epsilon(1e-6));
+
+    auto below = lookup_table_I(0.5);
     REQUIRE(below.s == Catch::Approx(row_1_1.s));
     REQUIRE(below.delta == Catch::Approx(row_1_1.delta));
-    REQUIRE(below.B == Catch::Approx(row_1_1.B));
 
     auto above = lookup_table_I(200.0);
     auto row_100 = lookup_table_I(100.0);

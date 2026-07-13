@@ -59,8 +59,17 @@ def test_tabulated_photon_field_reproduces_power_law():
     assert f_ph(3e-11) == pytest.approx(3e-11 ** -1.5, rel=1e-9)
 
 
-def test_abstract_bases_not_constructible():
-    with pytest.raises(TypeError):
-        ks.io.ProtonSpectrum()
-    with pytest.raises(TypeError):
-        ks.io.PhotonField()
+def test_abstract_bases_subclassable_but_not_callable_raw():
+    # Since the trampolines landed, the bases ARE instantiable (that is what
+    # makes Python subclassing work) -- but calling the pure-virtual
+    # __call__ on a non-overriding instance must raise, not crash.
+    class MySpec(ks.io.ProtonSpectrum):
+        def __call__(self, E_p):
+            return 2.0 * E_p
+
+    assert MySpec()(3.0) == 6.0
+
+    with pytest.raises(RuntimeError):
+        ks.io.ProtonSpectrum()(1.0)
+    with pytest.raises(RuntimeError):
+        ks.io.PhotonField()(1.0)

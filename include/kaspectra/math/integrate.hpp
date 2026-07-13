@@ -9,6 +9,17 @@ namespace kaspectra::math {
 
     namespace detail {
 
+        // Count of panels that bailed out at max_depth WITHOUT meeting their
+        // tolerance -- the signature of every silent-wrong-answer /
+        // near-hang quadrature failure found in this project (a NaN-poisoned
+        // integrand, a non-Lipschitz cancellation region, a singular edge).
+        // thread_local so DNdEeTable's parallel build doesn't race; each
+        // thread observes only its own integrations.
+        inline long& max_depth_hit_counter() {
+            thread_local long count = 0;
+            return count;
+        }
+
         inline double simpson(double fa, double fm, double fb, double a, double b) {
             return (b - a) / 6.0 * (fa + 4.0 * fm + fb);
         }
@@ -46,9 +57,29 @@ namespace kaspectra::math {
         // chaotic well before the interval becomes degenerate.
         constexpr double kEpsilonFloorMultiplier = 4.0;
 
+        // Noise-stagnation bail: a panel whose Richardson error estimate does
+        // not SHRINK under refinement is integrating floating-point noise,
+        // not structure -- splitting it further fills the entire 2^depth
+        // recursion tree learning nothing (measured directly on bh::dN_dEe at
+        // its spectral peak: the value is converged to ~4e-5 by depth 6, but
+        // cost grows x8 per additional depth level, reaching CPU-hours at the
+        // former default depths, because W()'s ~1e9-ULP cancellation noise
+        // can never meet a tolerance that halves per level). Simpson on real
+        // structure shrinks the estimate x16 per level and a kink confined to
+        // one child shrinks it x2, both comfortably beating the factor-0.5
+        // gate (the comparison is strict, so exactly-x2 kinks keep refining);
+        // noise plateaus fluctuate around x1 and get culled -- a looser 0.75
+        // gate measurably let noise pass often enough to keep the growth
+        // exponential (~x2.7/level). Applied from depth 8 so early, coarse
+        // estimates are never trusted, and counted in max_depth_hit_counter
+        // (the tolerance was NOT certified) so it stays observable.
+        constexpr int kStagnationMinDepth = 8;
+        constexpr double kStagnationFactor = 0.5;
+
         inline double adaptive_simpson(const std::function<double(double)>& f,
                                         double a, double b, double fa, double fm, double fb,
-                                        double whole, double abs_tol, double rel_tol, int depth, int max_depth) {
+                                        double whole, double abs_tol, double rel_tol, int depth, int max_depth,
+                                        double prev_delta = std::numeric_limits<double>::infinity()) {
             double m = 0.5 * (a + b);
 
             // Bisection can no longer subdivide this interval in floating point
@@ -72,15 +103,36 @@ namespace kaspectra::math {
             const double eps_floor = kEpsilonFloorMultiplier * std::numeric_limits<double>::epsilon() * std::fabs(combined);
             double tol = std::max({abs_tol, rel_tol * std::fabs(combined), eps_floor});
 
-            if (depth >= max_depth || std::fabs(combined - whole) <= 15.0 * tol) {
+            const double delta = std::fabs(combined - whole);
+            const bool converged = delta <= 15.0 * tol;
+            const bool stagnant = depth >= kStagnationMinDepth && delta > kStagnationFactor * prev_delta;
+            if (depth >= max_depth || converged || stagnant) {
+                if (!converged) ++max_depth_hit_counter();
                 return combined + (combined - whole) / 15.0;
             }
 
-            return adaptive_simpson(f, a, m, fa, flm, fm, left, abs_tol, rel_tol / 2.0, depth + 1, max_depth) +
-                    adaptive_simpson(f, m, b, fm, frm, fb, right, abs_tol, rel_tol / 2.0, depth + 1, max_depth);
+            return adaptive_simpson(f, a, m, fa, flm, fm, left, abs_tol, rel_tol / 2.0, depth + 1, max_depth, delta) +
+                    adaptive_simpson(f, m, b, fm, frm, fb, right, abs_tol, rel_tol / 2.0, depth + 1, max_depth, delta);
         }
 
     } // namespace detail
+
+    // Diagnostics for the silent-failure class: a panel that exhausts
+    // max_depth without converging returns its best estimate with NO error
+    // signal, and every bad-numerics episode in this project (the 70-order
+    // under-integration, the psi cancellation near-hang, the p_minus=0 NaN
+    // grind) manifested exactly this way. Pattern:
+    //
+    //     math::reset_max_depth_hits();
+    //     double v = expensive_integral(...);
+    //     if (math::max_depth_hits() > 0) { /* v may be under-converged */ }
+    //
+    // Per-thread counters (see detail::max_depth_hit_counter), so check on
+    // the thread that ran the integration. Zero for every well-behaved
+    // integrand; a nonzero count is not necessarily wrong (the estimate may
+    // still be adequate) but says the requested tolerance was NOT certified.
+    inline long max_depth_hits() { return detail::max_depth_hit_counter(); }
+    inline void reset_max_depth_hits() { detail::max_depth_hit_counter() = 0; }
 
     // A single-panel adaptive Simpson only samples 3 points (a, mid, b) before deciding
     // whether to recurse. If the integrand's entire nonzero support is a narrow sliver

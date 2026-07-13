@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <vector>
 #include "kaspectra/math/interp1d.hpp"
 
@@ -48,11 +49,15 @@ namespace kaspectra::pgamma{
     // -----------------------------------------------------------------------
     // Table I - gamma-ray (KA2008 eq. 27, Table I, p.4)
     //
-    // Edge behavior: below eta/eta_0 = 1.1 (the first tabulated row),
-    // Interpolator1D clamps to the row-1.1 values. The paper itself states
-    // B_gamma -> 0 exactly at eta/eta_0 = 1 (text below eq. 29), but that
-    // point is not in the table and no analytic bridge for 1.0-1.1 is given
-    // Above eta/eta_0 = 100 (the last row), Interpolator1D likewise clamps
+    // Edge behavior: the paper states B_gamma -> 0 exactly at eta/eta_0 = 1
+    // (text below eq. 29) but tabulates nothing between 1.0 and the first row
+    // at 1.1. B is therefore blended linearly from 0 at rho=1 to the row-1.1
+    // value (continuous at 1.1 by construction) instead of clamping high --
+    // the previous clamp overestimated the near-threshold amplitude across
+    // ~10% of the fit's domain. s/delta keep the clamp: they only shape a
+    // spectrum whose amplitude B already vanishes at threshold, and the paper
+    // gives no threshold statement for them.
+    // Above eta/eta_0 = 100 (the last row), Interpolator1D clamps as before.
     // -----------------------------------------------------------------------
     inline PhiTableParams lookup_table_I(double eta_over_eta0) {
         static const math::Interpolator1D s_interp(
@@ -72,8 +77,12 @@ namespace kaspectra::pgamma{
             4.07e-17, 5.30e-17, 6.74e-17, 1.51e-16, 1.24e-16, 1.37e-16, 1.62e-16,
             1.71e-16, 1.78e-16, 1.84e-16, 1.93e-16, 4.74e-16, 7.70e-16, 1.06e-15, 2.73e-15 },
             math::InterpMode::Linear);
-        
-        return { B_interp(eta_over_eta0), s_interp(eta_over_eta0), delta_interp(eta_over_eta0) };
+
+        double B = B_interp(eta_over_eta0);
+        if (eta_over_eta0 < 1.1) {
+            B *= std::max(0.0, (eta_over_eta0 - 1.0) / 0.1);
+        }
+        return { B, s_interp(eta_over_eta0), delta_interp(eta_over_eta0) };
     }
 
     // -----------------------------------------------------------------------

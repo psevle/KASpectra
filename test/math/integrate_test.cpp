@@ -5,6 +5,8 @@
 
 using kaspectra::math::integrate;
 using kaspectra::math::integrate_log;
+using kaspectra::math::max_depth_hits;
+using kaspectra::math::reset_max_depth_hits;
 
 TEST_CASE("integrate matches closed-form for a polynomial", "[math][integrate]") {
     double result = integrate([](double x) { return x * x; }, 0.0, 3.0);
@@ -101,4 +103,25 @@ TEST_CASE("adaptive Simpson does not run away when convergence is limited by flo
     // with the floor, it should settle within a call budget appropriate for a smooth,
     // well-conditioned integrand over kDefaultPanels=32 initial panels.
     REQUIRE(call_count < 100000);
+}
+
+TEST_CASE("max_depth_hits counts unconverged bailouts and stays zero for smooth integrands",
+          "[math][integrate]") {
+    // Every silent-wrong-answer quadrature episode in this project ended with
+    // a panel exhausting max_depth WITHOUT meeting tolerance -- previously
+    // with no signal whatsoever. max_depth_hits() makes that observable.
+    reset_max_depth_hits();
+    (void)integrate([](double x) { return x * x; }, 0.0, 1.0);
+    REQUIRE(max_depth_hits() == 0);
+
+    // |x - pi/4|^(-1/2) has an interior integrable singularity: with a starved
+    // max_depth the panels containing it cannot converge and must be counted.
+    reset_max_depth_hits();
+    (void)integrate([](double x) { return 1.0 / std::sqrt(std::fabs(x - 0.7853981633974483) + 1e-300); },
+                    0.0, 1.0, 1e-14, 1e-12, /*max_depth=*/3);
+    REQUIRE(max_depth_hits() > 0);
+
+    // reset clears the counter.
+    reset_max_depth_hits();
+    REQUIRE(max_depth_hits() == 0);
 }

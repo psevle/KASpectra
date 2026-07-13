@@ -1,13 +1,39 @@
 cmake_minimum_required(VERSION 3.16)
-project(KASpectra LANGUAGES CXX)
+project(KASpectra VERSION 0.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # kaspectra is header-only for now; becomes a compiled lib once src/ gains .cpp files.
 add_library(kaspectra INTERFACE)
-target_include_directories(kaspectra INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_library(KASpectra::kaspectra ALIAS kaspectra)
+target_include_directories(kaspectra INTERFACE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>)
 target_compile_features(kaspectra INTERFACE cxx_std_17)
+
+# install + find_package(KASpectra) support for C++ consumers:
+#   cmake --install build --prefix <prefix>
+#   find_package(KASpectra REQUIRED)
+#   target_link_libraries(app PRIVATE KASpectra::kaspectra)
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+
+install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(TARGETS kaspectra EXPORT KASpectraTargets)
+install(EXPORT KASpectraTargets
+        NAMESPACE KASpectra::
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/KASpectra)
+
+write_basic_package_version_file(
+    "${CMAKE_CURRENT_BINARY_DIR}/KASpectraConfigVersion.cmake"
+    COMPATIBILITY SameMajorVersion)
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/KASpectraConfig.cmake"
+    "include(\"\${CMAKE_CURRENT_LIST_DIR}/KASpectraTargets.cmake\")\n")
+install(FILES
+    "${CMAKE_CURRENT_BINARY_DIR}/KASpectraConfig.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/KASpectraConfigVersion.cmake"
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/KASpectra)
 
 option(KASPECTRA_BUILD_TESTS "Build KASpectra unit tests" ON)
 

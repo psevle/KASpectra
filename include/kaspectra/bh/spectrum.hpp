@@ -1,7 +1,9 @@
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
+#include <vector>
 
 #include "kaspectra/constants.hpp"
 #include "kaspectra/io/photon_field.hpp"
@@ -108,28 +110,34 @@ namespace kaspectra::bh {
 
         // Innermost integral of eq.62/eq.67, shared by the general and the
         // Planckian-specialized paths:
-        //     I(omega) = Int[E_minus_lo, omega-1] dE_- (p_+/p_-) W(omega, E_-, xi)
+        //     I(omega) = Int[E_minus_lo, omega-1] dE_- p_+ W(omega, E_-, xi)
+        // (eq.62's dE_-/p_- against W_KA = alpha r0^2 (p_- p_+ / 2 omega^3) W
+        // cancels the p_- COMPLETELY -- an earlier version kept a spurious
+        // extra 1/p_-, which agreed accidentally at near-threshold windows
+        // where the integral is dominated by E_- ~ 1.2-1.4 with 1/p_- ~ 1.1,
+        // but suppressed wide-window/UHECR configurations by up to ~10x; see
+        // the dN_dEe moment-consistency and Fig.10 tests that now pin this.)
         // E_plus = omega - E_minus -> 1 (p_plus -> 0) exactly at E_minus = omega-1.
         // W() has a removable 0/0 there (delta_plus_T/p_plus in its term6); the
         // quadrature below always samples its upper panel edge exactly, so
         // evaluating right at that edge returns NaN and poisons the whole integral
         // (silently, since NaN comparisons never trigger tolerance convergence --
         // the adaptive recursion then runs to max_depth on every affected panel,
-        // at every level of nesting). The true limit there is finite (p_plus in
-        // the numerator of the p_plus/p_minus factor cancels W's 1/p_plus term
-        // analytically), so backing the bound off by a relative epsilon drops only
-        // a measure-zero sliver, not real integration accuracy.
+        // at every level of nesting). The true limit there is finite (the p_plus
+        // factor cancels W's 1/p_plus term analytically), so backing the bound
+        // off by a relative epsilon drops only a measure-zero sliver, not real
+        // integration accuracy.
         inline double E_minus_integral(double omega, double gamma_p, double e_e, double E_minus_lo,
                                         double abs_tol, double rel_tol, int max_depth, int panels) {
             // Mirror backoff at the LOWER edge: E_minus_lo == 1 exactly when
             // e_e == gamma_p (a query right at the spectral peak E_e =
-            // gamma_p*m_e). p_minus = 0 there, so the integrand's 1/p_minus is
-            // sampled as inf/NaN at the panel edge and the adaptive recursion
-            // grinds to max_depth at every nesting level -- measured as a
-            // multi-HOUR near-hang for a single call (vs ~seconds one grid
-            // point away). The singularity is integrable (~1/sqrt(E_- - 1)),
-            // so a relative backoff drops only a measure-zero sliver, same as
-            // the upper edge's.
+            // gamma_p*m_e). p_minus = 0 there, so xi (division by p_minus) and
+            // W's own 1/p_minus^2 terms are sampled as inf/NaN at the panel
+            // edge and the adaptive recursion grinds to max_depth at every
+            // nesting level -- measured as a multi-HOUR near-hang for a single
+            // call (vs ~seconds one grid point away). The edge singularity is
+            // integrable, so a relative backoff drops only a measure-zero
+            // sliver, same as the upper edge's.
             const double E_minus_lo_eff = std::max(E_minus_lo, 1.0) * (1.0 + 1e-9);
             const double E_minus_hi = (omega - 1.0) * (1.0 - 1e-9);
             if (E_minus_lo_eff >= E_minus_hi) return 0.0;
@@ -139,10 +147,26 @@ namespace kaspectra::bh {
                 const double E_plus   = omega - E_minus;
                 const double p_plus   = std::sqrt(E_plus * E_plus - 1.0);
                 const double xi = xi_cos_theta_minus(gamma_p, e_e, E_minus, p_minus);
-                return (p_plus / p_minus) * W(omega, E_minus, xi);
+                return p_plus * W(omega, E_minus, xi);
             };
 
-            return math::integrate_log(integrand, E_minus_lo_eff, E_minus_hi, abs_tol, rel_tol, max_depth, panels);
+            // Integrate in v = ln(E_- - 1) rather than ln(E_-): when
+            // E_minus_lo == 1 (a query at exactly E_e = gamma_p*m_e) the
+            // integrand carries a PHYSICAL integrable log singularity
+            // p_+ W ~ 1/(E_- - 1) at the lower edge (W ~ 1/p_-^2 with
+            // Delta_- pinned at e_e/gamma_p). In ln(E_-) coordinates the
+            // adaptive recursion grinds against 1/x for minutes per call and
+            // still truncates the edge at the backoff; in ln(E_- - 1)
+            // coordinates that factor is FLAT (f * (E_- - 1) bounded), so the
+            // quadrature is fast and captures the edge mass. Away from the
+            // edge, v ~ ln E_- and the substitution behaves like the plain
+            // log grid.
+            auto g = [&](double v) {
+                const double x = std::exp(v);
+                return integrand(1.0 + x) * x;
+            };
+            return math::integrate(g, std::log(E_minus_lo_eff - 1.0), std::log(E_minus_hi - 1.0),
+                                    abs_tol, rel_tol, max_depth, panels);
         }
 
     }   // namespace detail
@@ -214,11 +238,11 @@ namespace kaspectra::bh {
     //
     //   W_KA(omega,E_-,cos) = alpha*r0^2 * (p_-*p_+ / (2*omega^3)) * W(omega,E_-,cos)
     //
-    // Substituting: omega*domega combines with 1/omega^3 into domega/omega^2, one
-    // p_- cancels eq.62's dE_-/p_-, leaving p_+/p_-:
+    // Substituting: omega*domega combines with 1/omega^3 into domega/omega^2, and
+    // the p_- in W_KA's prefactor cancels eq.62's dE_-/p_- COMPLETELY, leaving p_+:
     //
     //   dN/dE_e = (alpha*r0^2)/(4 gamma_p^3) Int deps f_ph(eps)/eps^2
-    //             Int domega/omega^2 Int dE_- (p_+/p_-) W(omega,E_-,xi)
+    //             Int domega/omega^2 Int dE_- p_+ W(omega,E_-,xi)
     //
     // eq.62 uses Blumenthal's c=hbar=m_e=1 convention; restoring physical units
     // (E_e, eps in GeV, gamma_p dimensionless) needs e_e=E_e/m_e substituted
@@ -280,19 +304,93 @@ namespace kaspectra::bh {
                 math::integrate_log(eps_integrand, eps_lo, epsilon_max, abs_tol, rel_tol, max_depth, panels);
     }
 
+    // Field-agnostic fast path: the SAME integration-order swap that powers
+    // dN_dEe_planck, but with the eps cumulative
+    //     G(x) = Int[x, epsilon_max] f_ph(eps)/eps^2 deps
+    // evaluated numerically instead of analytically (for a Planckian field G
+    // has the closed form eq.66 gives; for any other field it doesn't, but
+    // nothing about the swap itself required the closed form):
+    //
+    //   dN/dE_e = alpha_r0sq_c m_e / (4 gamma_p^3)
+    //             Int[omega_lo, omega_hi] domega/omega^2
+    //                 G(omega m_e/(2 gamma_p)) I(omega)
+    //
+    // G is set up once per call as suffix sums of per-segment adaptive
+    // integrals on a log grid over [eps_lo, epsilon_max] (f_ph evaluations
+    // only -- cheap), and each query point is then completed EXACTLY by one
+    // small adaptive integral over the remaining sub-segment (never wider
+    // than one grid step), so no interpolation error enters anywhere: the
+    // result differs from dN_dEe_general only by quadrature tolerances, at
+    // one adaptive-nesting level less cost. See the parity tests in
+    // test/bh/spectrum_test.cpp (power-law and tabulated fields).
+    inline double dN_dEe_fast(double E_e, double gamma_p, const io::PhotonField& f_ph, double epsilon_max,
+                                double abs_tol = 1e-25, double rel_tol = 1e-4,
+                                int max_depth = 20, int panels = 24) {
+        using namespace kaspectra::constants;
+
+        const double e_e = E_e / m_e;
+        const double eps_lo = eps_lo_bound(gamma_p, E_e, m_e);
+        if (eps_lo >= epsilon_max) return 0.0;
+
+        const double omega_lo = omega_lo_bound(gamma_p, e_e);
+        const double omega_hi = 2.0 * gamma_p * epsilon_max / m_e;
+        const double E_minus_lo = E_minus_lo_bound(gamma_p, e_e);
+
+        auto f_over_eps2 = [&](double eps) { return f_ph(eps) / (eps * eps); };
+
+        // Log grid over [eps_lo, epsilon_max], ~24 points/decade (min 4
+        // segments); suffix[i] = Int[grid[i], epsilon_max].
+        const double decades = std::log10(epsilon_max / eps_lo);
+        const int n_seg = std::max(4, static_cast<int>(std::ceil(decades * 24.0)));
+        std::vector<double> grid(static_cast<std::size_t>(n_seg) + 1);
+        const double log_lo = std::log(eps_lo), log_hi = std::log(epsilon_max);
+        for (int i = 0; i <= n_seg; ++i) {
+            grid[static_cast<std::size_t>(i)] =
+                std::exp(log_lo + (log_hi - log_lo) * static_cast<double>(i) / n_seg);
+        }
+        grid.front() = eps_lo;
+        grid.back() = epsilon_max;
+
+        std::vector<double> suffix(grid.size(), 0.0);
+        for (int i = n_seg - 1; i >= 0; --i) {
+            const auto ui = static_cast<std::size_t>(i);
+            suffix[ui] = suffix[ui + 1] +
+                math::integrate_log(f_over_eps2, grid[ui], grid[ui + 1], abs_tol, rel_tol, max_depth, 4);
+        }
+
+        auto G = [&](double x) {
+            if (x >= epsilon_max) return 0.0;
+            if (x <= eps_lo) return suffix.front();
+            const auto it = std::upper_bound(grid.begin(), grid.end(), x);
+            const auto hi = static_cast<std::size_t>(it - grid.begin());
+            return suffix[hi] + math::integrate_log(f_over_eps2, x, grid[hi], abs_tol, rel_tol, max_depth, 4);
+        };
+
+        auto omega_integrand = [&](double omega) {
+            const double g = G(omega * m_e / (2.0 * gamma_p));
+            if (g <= 0.0) return 0.0;
+            const double inner = detail::E_minus_integral(omega, gamma_p, e_e, E_minus_lo,
+                                                            abs_tol, rel_tol, max_depth, panels);
+            return g * inner / (omega * omega);
+        };
+
+        return (alpha_r0sq_c * m_e / (4.0 * gamma_p * gamma_p * gamma_p)) *
+                math::integrate_log(omega_integrand, omega_lo, omega_hi, abs_tol, rel_tol, max_depth, panels);
+    }
+
     // Public entry point: dispatches to the Planckian-specialized eq.67 path
-    // when f_ph is a BlackbodyPhotonField (one adaptive-quadrature level
-    // cheaper; an exact algebraic rearrangement of the same integral, not an
-    // approximation -- see dN_dEe_planck), otherwise evaluates the general
-    // eq.62 triple integral. dN_dEe_general stays public as the
-    // field-type-agnostic reference path.
+    // when f_ph is a BlackbodyPhotonField, otherwise to the field-agnostic
+    // dN_dEe_fast -- both are exact algebraic rearrangements of the eq.62
+    // triple integral, one adaptive-quadrature level cheaper, not
+    // approximations. dN_dEe_general stays public as the straightforward
+    // eq.62 reference path.
     inline double dN_dEe(double E_e, double gamma_p, const io::PhotonField& f_ph, double epsilon_max,
                             double abs_tol = 1e-25, double rel_tol = 1e-4,
                             int max_depth = 20, int panels = 24) {
         if (const auto* bb = dynamic_cast<const io::BlackbodyPhotonField*>(&f_ph)) {
             return dN_dEe_planck(E_e, gamma_p, bb->kT(), epsilon_max, abs_tol, rel_tol, max_depth, panels);
         }
-        return dN_dEe_general(E_e, gamma_p, f_ph, epsilon_max, abs_tol, rel_tol, max_depth, panels);
+        return dN_dEe_fast(E_e, gamma_p, f_ph, epsilon_max, abs_tol, rel_tol, max_depth, panels);
     }
 
     // Minimum proton energy for which lab electron energy E_e is kinematically

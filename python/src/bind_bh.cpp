@@ -74,6 +74,33 @@ void bind_bh(py::module_& m) {
            py::arg("max_depth") = 20, py::arg("panels") = kaspectra::math::kDefaultPanels,
            "Vectorized energy_loss_rate over an array of E_p (GIL released).");
 
+    bh.def("nucleus_interaction_rate", &nucleus_interaction_rate,
+           py::arg("E_N"), py::arg("Z"), py::arg("A"), py::arg("f_ph"), py::arg("epsilon_max"),
+           py::arg("abs_tol") = 1e-10, py::arg("rel_tol") = 1e-8,
+           py::arg("max_depth") = 20, py::arg("panels") = kaspectra::math::kDefaultPanels,
+           "Z^2-scaled interaction rate for a nucleus of energy E_N, charge Z, "
+           "mass number A (evaluated at the proton energy with the same Lorentz factor).");
+
+    bh.def("nucleus_energy_loss_rate", &nucleus_energy_loss_rate,
+           py::arg("E_N"), py::arg("Z"), py::arg("A"), py::arg("f_ph"), py::arg("epsilon_max"),
+           py::arg("abs_tol") = 1e-10, py::arg("rel_tol") = 1e-8,
+           py::arg("max_depth") = 20, py::arg("panels") = kaspectra::math::kDefaultPanels,
+           "Z^2-scaled -dE_N/dt [GeV/s] for a nucleus (see nucleus_interaction_rate).");
+
+    bh.def("loss_timescale", &loss_timescale,
+           py::arg("E_p"), py::arg("f_ph"), py::arg("epsilon_max"),
+           py::arg("abs_tol") = 1e-10, py::arg("rel_tol") = 1e-8,
+           py::arg("max_depth") = 20, py::arg("panels") = kaspectra::math::kDefaultPanels,
+           "E-folding energy-loss time E_p/(dE_p/dt) [s]; +inf below threshold. "
+           "Divide by constants.seconds_per_year for years.");
+
+    bh.def("interaction_length", &interaction_length,
+           py::arg("E_p"), py::arg("f_ph"), py::arg("epsilon_max"),
+           py::arg("abs_tol") = 1e-10, py::arg("rel_tol") = 1e-8,
+           py::arg("max_depth") = 20, py::arg("panels") = kaspectra::math::kDefaultPanels,
+           "Mean free path c/rate [cm]; +inf below threshold. Divide by "
+           "constants.cm_per_Mpc for Mpc.");
+
     bh.def("q_pair_rate", &q_pair_rate,
            py::arg("J_p"), py::arg("f_ph"), py::arg("E_p_max"), py::arg("epsilon_max"),
            py::arg("abs_tol") = 1e-10, py::arg("rel_tol") = 1e-8,
@@ -99,9 +126,17 @@ void bind_bh(py::module_& m) {
            py::arg("E_e"), py::arg("gamma_p"), py::arg("f_ph"), py::arg("epsilon_max"),
            py::arg("abs_tol") = 1e-25, py::arg("rel_tol") = 1e-4,
            py::arg("max_depth") = 20, py::arg("panels") = 24,
-           "Field-type-agnostic eq.62 triple integral -- the reference path. "
-           "dN_dEe itself auto-dispatches blackbody fields to the faster "
-           "Planckian-specialized eq.67 form.");
+           "Straightforward eq.62 triple integral -- the reference path. "
+           "dN_dEe itself auto-dispatches to the faster eq.67-style forms "
+           "(dN_dEe_planck for blackbody fields, dN_dEe_fast otherwise).");
+
+    bh.def("dN_dEe_fast", &dN_dEe_fast,
+           py::arg("E_e"), py::arg("gamma_p"), py::arg("f_ph"), py::arg("epsilon_max"),
+           py::arg("abs_tol") = 1e-25, py::arg("rel_tol") = 1e-4,
+           py::arg("max_depth") = 20, py::arg("panels") = 24,
+           "Field-agnostic fast path: same integration-order swap as "
+           "dN_dEe_planck with the eps cumulative computed numerically. Exact "
+           "rearrangement of eq.62, one quadrature level cheaper.");
 
     bh.def("dN_dEe_planck", &dN_dEe_planck,
            py::arg("E_e"), py::arg("gamma_p"), py::arg("kT"), py::arg("epsilon_max"),
@@ -165,11 +200,16 @@ void bind_bh(py::module_& m) {
         "over_E_e, then call repeatedly -- cheap log-log interpolation instead of "
         "the underlying nested integral. Immutable after construction.")
         .def(py::init<>(), "Empty table: reachable()==False, __call__ always returns 0.0.")
+        // call_guard releases the GIL for the (multi-threaded) build: with a
+        // Python-defined PhotonField the async workers must acquire the GIL
+        // per evaluation (see bind_io.cpp's trampoline note), which would
+        // deadlock against a launcher still holding it.
         .def_static("over_gamma_p", &DNdEeTable::over_gamma_p,
                     py::arg("E_e"), py::arg("f_ph"), py::arg("epsilon_max"), py::arg("gamma_p_max"),
                     py::arg("n_points") = 0,
                     py::arg("abs_tol") = 1e-25, py::arg("rel_tol") = 1e-4,
                     py::arg("max_depth") = 20, py::arg("panels") = 24,
+                    py::call_guard<py::gil_scoped_release>(),
                     "Build over gamma_p at fixed E_e (feeds q_pair_spectrum_cached's outer integral).")
         .def_static("over_E_e", &DNdEeTable::over_E_e,
                     py::arg("gamma_p"), py::arg("f_ph"), py::arg("epsilon_max"),
@@ -178,6 +218,7 @@ void bind_bh(py::module_& m) {
                     py::arg("n_points") = 0,
                     py::arg("abs_tol") = 1e-25, py::arg("rel_tol") = 1e-4,
                     py::arg("max_depth") = 20, py::arg("panels") = 24,
+                    py::call_guard<py::gil_scoped_release>(),
                     "Build over E_e at fixed gamma_p (feeds a dense E_e sweep/plot).")
         .def("__call__", &DNdEeTable::operator(), py::arg("x"))
         .def("__call__", [](const DNdEeTable& t, py::array_t<double, py::array::c_style | py::array::forcecast> x) {
@@ -219,6 +260,7 @@ void bind_bh(py::module_& m) {
                     py::arg("n_E_e_lines") = 0, py::arg("n_points_per_line") = 0,
                     py::arg("abs_tol") = 1e-25, py::arg("rel_tol") = 1e-4,
                     py::arg("max_depth") = 20, py::arg("panels") = 24,
+                    py::call_guard<py::gil_scoped_release>(),
                     "Build over the E_e band [E_e_min, E_e_max] with proton budget E_p_max.")
         .def("__call__", &DNdEeTable2D::operator(), py::arg("E_e"), py::arg("gamma_p"))
         .def("built", &DNdEeTable2D::built)
