@@ -69,6 +69,32 @@ namespace kaspectra::io {
             math::Interpolator1D interp_;
     };
 
+    // Sum of photon fields -- the standard astrophysical target is a
+    // superposition (CMB + infrared + starlight), and every routine in this
+    // library takes a single PhotonField&. NON-OWNING: stores pointers to the
+    // added fields, which the caller must keep alive for the composite's
+    // lifetime (the Python binding enforces this with keep_alive). Note that
+    // a composite is not a BlackbodyPhotonField even if every component is,
+    // so bh::dN_dEe routes it through the field-agnostic fast path rather
+    // than the Planckian one.
+    class CompositePhotonField final : public PhotonField {
+        public:
+            CompositePhotonField() = default;
+
+            void add(const PhotonField& field) { fields_.push_back(&field); }
+
+            double operator()(double epsilon) const override {
+                double sum = 0.0;
+                for (const PhotonField* f : fields_) sum += (*f)(epsilon);
+                return sum;
+            }
+
+            std::size_t size() const { return fields_.size(); }
+
+        private:
+            std::vector<const PhotonField*> fields_;
+    };
+
     // Usage:
     //   kaspectra::io::BlackbodyPhotonField cmb(2.725); // 2.725 K CMB
     //   double n = cmb(1e-13); // dn/depsilon near CMB peak [cm^-3 GeV^-1]

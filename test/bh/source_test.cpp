@@ -149,3 +149,37 @@ TEST_CASE("interaction_rate does not hang at an extreme photon-field normalizati
     REQUIRE(rate >= 0.0);
     REQUIRE(loss >= 0.0);
 }
+
+TEST_CASE("nucleus wrappers reduce to the proton functions at Z=A=1 and scale as Z^2 at fixed gamma",
+          "[bh][source]") {
+    BlackbodyPhotonField cmb(2.725);
+    double E_p = 1e10, eps_max = 1e-6;
+
+    REQUIRE(bh::nucleus_interaction_rate(E_p, 1.0, 1.0, cmb, eps_max)
+            == bh::interaction_rate(E_p, cmb, eps_max));
+    REQUIRE(bh::nucleus_energy_loss_rate(E_p, 1.0, 1.0, cmb, eps_max)
+            == bh::energy_loss_rate(E_p, cmb, eps_max));
+
+    // Helium at the SAME Lorentz factor as a 1e10 GeV proton (E_He = 4 E_p):
+    // rate and -dE/dt are exactly Z^2 = 4x the proton's.
+    REQUIRE(bh::nucleus_interaction_rate(4.0 * E_p, 2.0, 4.0, cmb, eps_max)
+            == Catch::Approx(4.0 * bh::interaction_rate(E_p, cmb, eps_max)).epsilon(1e-12));
+    REQUIRE(bh::nucleus_energy_loss_rate(4.0 * E_p, 2.0, 4.0, cmb, eps_max)
+            == Catch::Approx(4.0 * bh::energy_loss_rate(E_p, cmb, eps_max)).epsilon(1e-12));
+}
+
+TEST_CASE("loss_timescale and interaction_length wrap the rates, infinite below threshold",
+          "[bh][source]") {
+    BlackbodyPhotonField cmb(2.725);
+    double E_p = 1e10, eps_max = 1e-6;
+
+    REQUIRE(bh::loss_timescale(E_p, cmb, eps_max)
+            == Catch::Approx(E_p / bh::energy_loss_rate(E_p, cmb, eps_max)).epsilon(1e-12));
+    REQUIRE(bh::interaction_length(E_p, cmb, eps_max)
+            == Catch::Approx(constants::c_light / bh::interaction_rate(E_p, cmb, eps_max)).epsilon(1e-12));
+
+    // Below the kappa==2 threshold both rates are exactly zero -> +infinity.
+    double eps_below = constants::m_p * constants::m_e / E_p * 0.5;
+    REQUIRE(std::isinf(bh::loss_timescale(E_p, cmb, eps_below)));
+    REQUIRE(std::isinf(bh::interaction_length(E_p, cmb, eps_below)));
+}

@@ -96,4 +96,51 @@ namespace kaspectra::bh {
         return math::integrate_log(integrand, E_p_lo, E_p_max, abs_tol, rel_tol, max_depth, panels);
     }
 
+    // --- Nuclei -----------------------------------------------------------
+    // Chodorowski+1992 derives its rate/loss formulas for a nucleus of charge
+    // Z: the Born cross-section carries Z^2, and the kinematics depend only
+    // on the nucleus Lorentz factor gamma = E_N/(A m_p) (nucleon-mass
+    // approximation for the nuclear mass, adequate at the <1% level next to
+    // the fits' own quoted accuracy). Both wrappers therefore delegate to the
+    // per-proton functions evaluated at the PROTON energy with the same
+    // Lorentz factor, E_p = E_N/A, scaled by Z^2. Z=1, A=1 reduces to the
+    // proton functions identically.
+
+    inline double nucleus_interaction_rate(double E_N, double Z, double A,
+                                            const io::PhotonField& f_ph, double epsilon_max,
+                                            double abs_tol = 1e-10, double rel_tol = 1e-8,
+                                            int max_depth = 20, int panels = math::kDefaultPanels) {
+        return Z * Z * interaction_rate(E_N / A, f_ph, epsilon_max, abs_tol, rel_tol, max_depth, panels);
+    }
+
+    // -dE_N/dt [GeV/s] of the nucleus (eq.3.11's gamma-dependent expression
+    // is unchanged; only the Z^2 prefactor and the gamma <-> E_N relation
+    // differ from the proton case).
+    inline double nucleus_energy_loss_rate(double E_N, double Z, double A,
+                                            const io::PhotonField& f_ph, double epsilon_max,
+                                            double abs_tol = 1e-10, double rel_tol = 1e-8,
+                                            int max_depth = 20, int panels = math::kDefaultPanels) {
+        return Z * Z * energy_loss_rate(E_N / A, f_ph, epsilon_max, abs_tol, rel_tol, max_depth, panels);
+    }
+
+    // --- Convenience observables -----------------------------------------
+    // Thin wrappers over the rates in astrophysically conventional shapes.
+    // Both return +infinity below threshold (rate == 0), which is the
+    // physically meaningful answer (no losses / no interactions).
+
+    // e-folding energy-loss time E_p / (dE_p/dt) [s]. Divide by
+    // constants::seconds_per_year for years.
+    inline double loss_timescale(double E_p, const io::PhotonField& f_ph, double epsilon_max,
+                                    double abs_tol = 1e-10, double rel_tol = 1e-8,
+                                    int max_depth = 20, int panels = math::kDefaultPanels) {
+        return E_p / energy_loss_rate(E_p, f_ph, epsilon_max, abs_tol, rel_tol, max_depth, panels);
+    }
+
+    // Mean free path c / rate [cm]. Divide by constants::cm_per_Mpc for Mpc.
+    inline double interaction_length(double E_p, const io::PhotonField& f_ph, double epsilon_max,
+                                        double abs_tol = 1e-10, double rel_tol = 1e-8,
+                                        int max_depth = 20, int panels = math::kDefaultPanels) {
+        return constants::c_light / interaction_rate(E_p, f_ph, epsilon_max, abs_tol, rel_tol, max_depth, panels);
+    }
+
 }   // namespace kaspectra::bh

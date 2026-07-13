@@ -4,6 +4,7 @@
 #include <limits>
 
 #include <kaspectra/bh/spectrum.hpp>
+#include <kaspectra/bh/spectrum_cache.hpp>
 #include <kaspectra/bh/source.hpp>
 #include <kaspectra/io/photon_field.hpp>
 #include <kaspectra/io/proton_spectrum.hpp>
@@ -272,4 +273,118 @@ TEST_CASE("dN_dEe_planck handles the finite epsilon_max cutoff exactly", "[bh][s
     CAPTURE(general, planck);
     REQUIRE(general > 0.0);
     REQUIRE(planck == Catch::Approx(general).epsilon(0.05));
+}
+
+TEST_CASE("dN_dEe moments reproduce interaction_rate and energy_loss_rate", "[bh][spectrum][slow]") {
+    // THE independent cross-check unique to this module: each pair event
+    // makes exactly one electron, so integrating the one-species spectrum
+    // over its full kinematic window must reproduce the (independently
+    // implemented, Chodorowski-fit-based) interaction rate, and the
+    // energy-weighted integral of BOTH species must reproduce the energy-loss
+    // rate. This pins eq.62's prefactor and phase-space factor, which no
+    // other test constrains -- and it is NOT hypothetical: writing this test
+    // caught a real shipped bug (a spurious extra 1/p_minus in the inner
+    // integrand that agreed accidentally at near-threshold kinematics but
+    // suppressed UHECR-scale spectra by up to ~10x; see E_minus_integral's
+    // doc comment). Post-fix, the identity holds to ~0.1% even at
+    // UHECR/CMB scale (measured: 1.000/0.999 by dense trapezoid). The
+    // near-threshold config here keeps the runtime to seconds; tolerance 5%
+    // absorbs the outer quadrature at these settings.
+    double gamma_p = 1e3;
+    double kT = 1e-7;
+    BlackbodyPhotonField warm_field(kT / constants::k_boltzmann);
+    double eps_max = 20.0 * kT;
+    double E_p = gamma_p * constants::m_p;
+
+    auto w = bh::E_e_window(gamma_p, eps_max, constants::m_e);
+    REQUIRE(w.reachable);
+
+    double n0 = kaspectra::math::integrate_log(
+        [&](double E_e) { return bh::dN_dEe(E_e, gamma_p, warm_field, eps_max); },
+        w.lo * (1.0 + 1e-9), w.hi * (1.0 - 1e-9), 1e-30, 1e-4, 16, 16);
+    double n1 = kaspectra::math::integrate_log(
+        [&](double E_e) { return E_e * bh::dN_dEe(E_e, gamma_p, warm_field, eps_max); },
+        w.lo * (1.0 + 1e-9), w.hi * (1.0 - 1e-9), 1e-30, 1e-4, 16, 16);
+
+    double rate = bh::interaction_rate(E_p, warm_field, eps_max);
+    double loss = bh::energy_loss_rate(E_p, warm_field, eps_max);
+
+    CAPTURE(n0, rate, n1, loss);
+    REQUIRE(n0 == Catch::Approx(rate).epsilon(0.05));
+    REQUIRE(2.0 * n1 == Catch::Approx(loss).epsilon(0.05));
+}
+
+TEST_CASE("dN_dEe reproduces KA2008 Fig.10's pair-production bell at 1e20 eV on the CMB",
+          "[bh][spectrum][slow]") {
+    // Direct comparison against the paper's own plotted result (E^2 dN/dE for
+    // N_e = N_+ + N_-, proton of 1e20 eV on the 2.7 K CMBR): bell peaking
+    // ~1.3e2 eV/s around E ~ 1e16-1e17.5 eV. Factor-2 tolerances reflect
+    // reading values off a log-log figure; that is still far tighter than the
+    // ~10x suppression the p_minus bug produced here before the fix. The
+    // energy-loss closure is checked tightly via the dense trapezoid over the
+    // same samples (this quantity also matches Fig.11 independently).
+    io::BlackbodyPhotonField cmb(2.7);
+    double E_p = 1e11;   // GeV == 1e20 eV
+    double gp = E_p / constants::m_p;
+    double em = 1e-6;
+
+    auto E2dNdE_both = [&](double E_e) {   // eV/s
+        return 2.0 * E_e * E_e * bh::dN_dEe(E_e, gp, cmb, em) * 1e9;
+    };
+
+    double peak = E2dNdE_both(1e8);        // 1e17 eV, at the bell's crown
+    CAPTURE(peak);
+    REQUIRE(peak > 130.0 / 2.0);
+    REQUIRE(peak < 130.0 * 2.0);
+
+    // Bell shape: rises from 1e15 eV, crests around 1e16-1e17 eV, falls by 1e19 eV.
+    REQUIRE(E2dNdE_both(1e6) < peak);
+    REQUIRE(E2dNdE_both(1e6) > peak / 10.0);
+    REQUIRE(E2dNdE_both(1e10) < peak / 10.0);
+
+    // Energy-loss closure over the sampled band (dense trapezoid, 8/decade):
+    // 2 * int E dN/dE dE == energy_loss_rate to a few percent.
+    double lo = 1e4, hi = 1e11;
+    int n = static_cast<int>(std::ceil(std::log10(hi / lo) * 8)) + 1;
+    double n1 = 0.0, prev_x = 0.0, prev_y = 0.0;
+    for (int i = 0; i < n; ++i) {
+        double x = lo * std::pow(10.0, static_cast<double>(i) / 8.0);
+        double y = x * x * bh::dN_dEe(x, gp, cmb, em);
+        if (i > 0) n1 += 0.5 * (prev_y + y) * std::log(x / prev_x);
+        prev_x = x;
+        prev_y = y;
+    }
+    double loss = bh::energy_loss_rate(E_p, cmb, em);
+    CAPTURE(n1, loss);
+    REQUIRE(2.0 * n1 == Catch::Approx(loss).epsilon(0.05));
+}
+
+TEST_CASE("dN_dEe_fast agrees with dN_dEe_general for non-blackbody fields, and dN_dEe dispatches to it",
+          "[bh][spectrum][slow]") {
+    // The field-agnostic swap must reproduce the reference triple integral to
+    // quadrature-tolerance level for fields with no analytic eps cumulative.
+    // Field shapes chosen to be reachable at gamma_p = 1e6 (support up to
+    // ~2e-6 GeV, same scale as the warm-blackbody configs above);
+    // normalizations are arbitrary (parity is normalization-independent).
+    double gamma_p = 1e6;
+    double eps_max = 2e-6;
+    double E_e = gamma_p * constants::m_e * 0.1;
+
+    io::PowerLawPhotonField pl_field(1e10, 2.0, 5e-7);
+    double general = bh::dN_dEe_general(E_e, gamma_p, pl_field, eps_max);
+    double fast = bh::dN_dEe_fast(E_e, gamma_p, pl_field, eps_max);
+    CAPTURE(general, fast);
+    REQUIRE(general > 0.0);
+    REQUIRE(fast == Catch::Approx(general).epsilon(0.05));
+    REQUIRE(bh::dN_dEe(E_e, gamma_p, pl_field, eps_max) == fast);   // dispatch
+
+    // Tabulated field (log-log interpolated power law with a bend).
+    std::vector<double> eps = {1e-9, 1e-8, 1e-7, 5e-7, 2e-6};
+    std::vector<double> fv = {1e14, 1e12, 1e10, 1e8, 1e5};
+    io::TabulatedPhotonField tab_field(eps, fv);
+    double general_t = bh::dN_dEe_general(E_e, gamma_p, tab_field, eps_max);
+    double fast_t = bh::dN_dEe_fast(E_e, gamma_p, tab_field, eps_max);
+    CAPTURE(general_t, fast_t);
+    REQUIRE(general_t > 0.0);
+    REQUIRE(fast_t == Catch::Approx(general_t).epsilon(0.05));
 }

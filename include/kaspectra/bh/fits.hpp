@@ -12,19 +12,59 @@ namespace kaspectra::bh {
         if (kappa < 2.0) return 0.0;
         double psi;
         if (kappa < 4.0) {
-            const double k = kappa;
-            psi = (2.0 * detail::pi_bh / 3.0) * (
-                347.0 / (40.0 * k)
-                - 130903.0 / 1440.0
-                - (19151.0 / 48.0) * std::log(2.0)
-                - (15163.0 / 480.0) * k
-                + (2593.0 / 1920.0) * k * k
-                + 3904.0 / (9.0 * (2.0 + k) * (2.0 + k) * (2.0 + k))
-                - 9688.0 / (15.0 * (2.0 + k) * (2.0 + k))
-                + 10676.0 / (15.0 * (2.0 + k))
-                + (1007.0 / 48.0) * std::log(k)
-                + 189.0 * std::log(2.0 + k)
-            );
+            // Chodorowski eq.2.4, restabilized in x = kappa-2. The printed form
+            // sums terms of order ~100-300 that cancel EXACTLY through cubic
+            // order at threshold (verified analytically: the rational constants
+            // sum to 0 over a common denominator of 1440, the log constants
+            // give (-19151+1007)/48*ln2 + 189*ln4 == 0, and a 60-digit Taylor
+            // expansion shows orders 0-3 vanish identically, psi ~ x^4/16 --
+            // matching phi's own explicit (pi/12)x^4 threshold form). Naive
+            // evaluation therefore loses ALL significant digits by x ~ 1e-4.
+            // Two-regime fix:
+            //   x < 1/4:  Taylor series of the printed form (coefficients from
+            //             a 60-digit mpmath expansion; a4 = 1/16 and
+            //             a5 = -7/160 are exact; convergence radius 2, so
+            //             truncation at x^16 is ~6e-12 relative at the switch).
+            //   x >= 1/4: the printed form with its (identically zero) constant
+            //             block dropped and every term written as a
+            //             cancellation-free difference from its kappa=2 value
+            //             (log1p, factored rationals); rounding-level agreement
+            //             with the printed form at mid-branch, ~6e-12 agreement
+            //             with the series at the switch point.
+            const double x = kappa - 2.0;
+            if (x < 0.25) {
+                constexpr double a[13] = {
+                    0.0625,                            // 1/16, exact
+                    -0.04375,                          // -7/160, exact
+                    0.0262369791666666666667,
+                    -0.0148670014880952380952,
+                    0.0081645965576171875,
+                    -0.00439973054108796296296,
+                    0.00234190622965494791667,
+                    -0.0012355515451142282197,
+                    0.000647288892004224989149,
+                    -0.000337103391304994240785,
+                    0.000174664883386521112351,
+                    -0.0000900987121793958875868,
+                    0.0000462980523783092697461,
+                };
+                double s = 0.0;
+                for (int i = 12; i >= 0; --i) s = s * x + a[i];
+                psi = (2.0 * detail::pi_bh / 3.0) * s * x * x * x * x;
+            } else {
+                const double q = 4.0 + x;             // == 2 + kappa
+                const double q2 = q * q, q3 = q2 * q;
+                psi = (2.0 * detail::pi_bh / 3.0) * (
+                    - (347.0 / 80.0) * x / (2.0 + x)
+                    - (15163.0 / 480.0) * x
+                    + (2593.0 / 1920.0) * x * (x + 4.0)
+                    - (3904.0 / 9.0) * x * (x * x + 12.0 * x + 48.0) / (64.0 * q3)
+                    + (9688.0 / 15.0) * x * (x + 8.0) / (16.0 * q2)
+                    - (10676.0 / 15.0) * x / (4.0 * q)
+                    + (1007.0 / 48.0) * std::log1p(x / 2.0)
+                    + 189.0 * std::log1p(x / 4.0)
+                );
+            }
         }
         else {
             const double k = kappa;

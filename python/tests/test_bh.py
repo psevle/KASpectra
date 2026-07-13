@@ -172,6 +172,91 @@ def test_q_pair_spectrum_cached_2d_guards(J_p, cmb):
     assert bh.q_pair_spectrum_cached(3.0, J_p, t, 1e13, 1e-15) == 0.0
 
 
+def test_nucleus_wrappers_and_observables(cmb):
+    E_p = 1e10
+    assert bh.nucleus_interaction_rate(E_p, 1.0, 1.0, cmb, 1e-6) == bh.interaction_rate(E_p, cmb, 1e-6)
+    assert bh.nucleus_interaction_rate(4 * E_p, 2.0, 4.0, cmb, 1e-6) == pytest.approx(
+        4.0 * bh.interaction_rate(E_p, cmb, 1e-6), rel=1e-12)
+    assert bh.loss_timescale(E_p, cmb, 1e-6) == pytest.approx(
+        E_p / bh.energy_loss_rate(E_p, cmb, 1e-6), rel=1e-12)
+    assert math.isinf(bh.interaction_length(E_p, cmb, ks.constants.m_p * ks.constants.m_e / E_p * 0.5))
+
+
+def test_composite_photon_field_sums(cmb):
+    ir = ks.io.PowerLawPhotonField(1e5, 1.5, 1e-10)
+    combo = ks.io.CompositePhotonField()
+    combo.add(cmb)
+    combo.add(ir)
+    assert len(combo) == 2
+    for eps in (1e-14, 1e-12, 1e-10):
+        assert combo(eps) == pytest.approx(cmb(eps) + ir(eps), rel=1e-12)
+
+
+def test_python_defined_photon_field_works_in_rates():
+    kT = 2.725 * ks.constants.k_boltzmann
+
+    class PyPlanck(ks.io.PhotonField):
+        def __init__(self):
+            super().__init__()
+
+        def __call__(self, eps):
+            import math as _m
+            x = eps / kT
+            if x > 700.0:   # C++ expm1 saturates; Python math raises OverflowError
+                return 0.0
+            return eps * eps / (ks.constants.pi ** 2 * ks.constants.hbar_c3 * _m.expm1(x))
+
+    ref = ks.io.BlackbodyPhotonField(2.725)
+    mine = PyPlanck()
+    # Field evaluation agrees...
+    assert mine(1e-13) == pytest.approx(ref(1e-13), rel=1e-12)
+    # ...and it is usable from a C++ integral loop (rate is a single integral;
+    # cheap even through the Python-callback overhead).
+    got = bh.interaction_rate(1e10, mine, 1e-6)
+    want = bh.interaction_rate(1e10, ref, 1e-6)
+    assert got == pytest.approx(want, rel=1e-9)
+
+
+def test_python_defined_field_in_parallel_table_build():
+    # The GIL-release + trampoline combination: a Python-defined field
+    # evaluated from DNdEeTable's std::async workers must neither deadlock
+    # nor crash. An unreachable band keeps this instant (build makes no
+    # dN_dEe calls but still exercises the guarded entry point end to end).
+    class Zero(ks.io.PhotonField):
+        def __call__(self, eps):
+            return 0.0
+
+    t = bh.DNdEeTable.over_gamma_p(1e-3, Zero(), 1e-15, gamma_p_max=1e10)
+    assert not t.reachable()
+
+
+def test_q_total_species_matches_channel_sum(cmb):
+    J_p = ks.io.PowerLawSpectrum(1.0, 2.0)
+    total = ks.q_total_species("gamma", 1e3, J_p, 1.0, cmb, 1e6, 1e6, 1e-9)
+    from kaspectra import pp as _pp, pgamma as _pg
+    parts = (_pp.q_species("gamma", 1e3, J_p, 1.0, 1e6, 1e6)
+             + _pg.q_species("gamma", 1e3, J_p, cmb, 1e6, 1e-9))
+    assert total == pytest.approx(parts, rel=1e-12)
+    with pytest.raises(ValueError):
+        ks.q_total_species("proton", 1e3, J_p, 1.0, cmb, 1e6, 1e6, 1e-9)
+
+
+def test_max_depth_hits_diagnostics():
+    ks.reset_max_depth_hits()
+    assert ks.max_depth_hits() == 0
+    # A smooth integrand certifies its tolerance: counter stays 0. (pp's
+    # single integral is genuinely smooth; bh's rates legitimately report a
+    # panel or two near the kappa==2 threshold where the fit's curvature
+    # meets the noise-stagnation bail, so they are not a zero-hit baseline.)
+    from kaspectra import pp as _pp
+    _pp.q_species("gamma", 1e3, ks.io.PowerLawSpectrum(1.0, 2.0), 1.0, 1e6, 1e6)
+    assert ks.max_depth_hits() == 0
+    # reset clears whatever the counter holds.
+    bh.interaction_rate(1e10, ks.io.BlackbodyPhotonField(2.725), 1e-6)
+    ks.reset_max_depth_hits()
+    assert ks.max_depth_hits() == 0
+
+
 # ---- expensive parity checks (opt-in: pytest -m slow) -----------------------
 
 
